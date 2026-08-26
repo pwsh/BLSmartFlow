@@ -62,7 +62,7 @@ src/blflow/indicator.h/.cpp     Non-blocking LED patterns (section 11)
 src/blflow/serial_provision.h/.cpp  JSON-over-USB provisioning (legacy keys kept)
 src/blflow/ssdp.h/.cpp          UPnP self-advertisement (optional, -DBLSF_SSDP)
 src/www/index.html              The UI (single file, inline CSS/JS, no external resources)
-test/test_curve/test_curve.cpp  Unity tests for curve.h, run with `pio test -e native`
+test/test_curve, test_parse, test_buffer   Unity tests (curve.h, printer_parse.h against real X1C fixtures, AutoGrowBufferStream), run with `pio test -e native`
 tools/mock_server.py            Python mock of the API for UI development (`python3 tools/mock_server.py` → http://localhost:8080)
 ```
 
@@ -139,8 +139,8 @@ float curveInterpolate(const FanCurve&, float temp);  // clamps to first/last po
 ## 7. Printer link (Bambu MQTT)
 
 * `WiFiClientSecure::setInsecure()`, port 8883, user `bblp`, password = access code, client id `BLSF-<chipid>`. `setKeepAlive(30)`, `setSocketTimeout(10)`, `setBufferSize(2048)` for TX; RX uses the `AutoGrowBufferStream` (fixed: `size_t` length, 64 KB cap, bounds-checked `get_string`, checked `realloc`).
-* Runs in `xTaskCreatePinnedToCore(task, "printer", 16384, …, 1, core 1)`. Reconnect with exponential backoff 3 s → 60 s; bad credentials (state 5) → backoff 60 s and `printer.mqttStateText="unauthorized"`. Never blocks the main loop.
-* On connect: subscribe `device/<serial>/report`, publish `{"pushing":{"sequence_id":"0","command":"pushall","version":1,"push_target":1}}` to `device/<serial>/request`. If `printer.model ∈ {p1,a1}` (or auto-detected diff-style pushes) repeat `pushall` every 5 min.
+* Runs in `xTaskCreatePinnedToCore(task, "printer", 20480, …, 1, core 1)` (the mbedTLS handshake runs on this stack). Reconnect with exponential backoff 3 s → 60 s; bad credentials (state 5) → backoff 60 s and `printer.mqttStateText="unauthorized"`. Never blocks the main loop.
+* On connect: subscribe `device/<serial>/report`, publish `{"pushing":{"sequence_id":"0","command":"pushall","version":1,"push_target":1}}` to `device/<serial>/request`. Repeat `pushall` every 5 min for `printer.model ∈ {p1,a1}`, every 10 min for `auto`, never for `x1`/`h2d`.
 * Re-initialise (disconnect + new server/topic) whenever printer config changes (`printerLink.reconfigure()`), no reboot.
 * Filtered `deserializeJson` keeping only:
   `print.{command, nozzle_temper, nozzle_target_temper, bed_temper, bed_target_temper, chamber_temper, cooling_fan_speed, big_fan1_speed, big_fan2_speed, heatbreak_fan_speed, fan_gear, gcode_state, mc_percent, mc_remaining_time, layer_num, total_layer_num, subtask_name, stg_cur, print_error, wifi_signal, home_flag, lights_report, device}`.
@@ -194,12 +194,13 @@ ESPAsyncWebServer on :80. `GET /` serves `index.html` (gzip, `Cache-Control: no-
 | `GET /api/wifi/scan` | — | `202 {"scanning":true}` while an async scan runs, else `{"networks":[{"ssid","bssid","rssi","channel","secure"}]}` sorted by rssi, deduped by ssid (strongest), uppercase BSSIDs, 2.4 GHz channels only. A result younger than **20 s** is served from the cache. `?force=1` discards the cache and starts a new scan, so it always answers `202` — the UI sends `force=1` on an explicit Scan click and then polls **without** it |
 | `POST /api/wifi` | `{"ssid","password","bssid","lockBssid","hostname"}` | `{"ok":true,"restartRequired":true}` — saves (through `validate()`), then restarts: after **1 s** in AP mode, after **1.5 s** otherwise |
 | `GET /api/backup` | — | full config **with secrets**, `Content-Disposition: attachment; filename="blsmartflow-<chipid>.json"` |
-| `POST /api/restore` | full config | `{"ok":true}` — **replaces** the whole config (defaults + body, so keys the body omits fall back to their defaults rather than keeping the current value), validates, saves, then restarts |
+| `POST /api/restore` | full config | `{"ok":true}` — **replaces** the whole config (defaults + body, so keys the body omits fall back to their defaults), except that masked (`****`) secrets keep the currently stored value; `400 {"error":"backup has no wifi.ssid"}` if the result has no SSID; validates, saves, then restarts |
 | `POST /api/update` | multipart, **any** file field name (the UI uses `firmware`) | `{"ok":true}` / `{"error"}`; restart on success. `/update` is an alias |
 | `GET /api/log` | — | `{"lines":["…"]}` — each line is `[<uptime ms, %7d>] [<I\|W\|E>] <message>`, e.g. `[   1234] [E] mqtt: connect failed`. The UI colours a line by the `[E]` / `[W]` tag |
 | `GET /api/info` | — | `{"fw","build","chipId","sdk","flashSize","sketchSize","freeSketchSpace","partition","resetReason"}`. `resetReason` is a **string**, one of `UNKNOWN, POWERON, EXT, SW, PANIC, INT_WDT, TASK_WDT, WDT, DEEPSLEEP, BROWNOUT, SDIO` |
 | Legacy endpoints (1.x compatible) | see below | see below |
-| Captive portal (AP mode only): `/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt`, `/fwlink`, `/redirect`, `/success.txt`, `/canonical.html` | — | 302 → `http://192.168.4.1/` |
+| Captive portal (requests arriving on the AP interface only): `/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt`, `/fwlink`, `/redirect`, `/success.txt`, `/canonical.html`, `/check_network_status.txt`, `/chat`, and any unknown path | — | 302 → `http://<softAP IP>/` with no-cache headers (LAN-side unknown paths stay 404) |
+| `GET /description.xml` | — | UPnP device description (SSDP schema); 404 when SSDP is disabled |
 
 **Legacy endpoints** (kept so 1.x tooling and the old setup page keep working):
 
@@ -230,7 +231,7 @@ ESPAsyncWebServer on :80. `GET /` serves `index.html` (gzip, `Cache-Control: no-
 **Null rules** — the status object never invents placeholder values:
 
 * Unknown temperatures are `null`.
-* The printer counters `printer.stage`, `printer.progress`, `printer.remainingMin`, `printer.layer` and `printer.totalLayers` are `null` while the printer has not reported them (no link, or no job loaded) — never `-1` or `0`. `stageText` is `""` when `stage` is `null`.
+* The printer counters `printer.stage`, `printer.progress`, `printer.remainingMin`, `printer.layer` and `printer.totalLayers` are `null` while the printer has not reported them (no link, or no job loaded) — never `-1` or `0`. `stageText` is `"idle"` when `stage` is `null`/-1/255.
 * `printer.lastUpdateSec` is `null` until the very first report ever arrives; the UI renders that as "never".
 * `wifi.ssid` is `""` when the device is not associated (AP mode included).
 * `fan.pwmDuty` is the byte actually written to the pin, already inverted when `fan.pwmInvert` is on (section 6).

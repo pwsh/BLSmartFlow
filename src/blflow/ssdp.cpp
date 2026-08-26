@@ -86,4 +86,13 @@ void ssdpReconfigure() {}
 
 bool ssdpActive() { return g_active; }
 
+const char* ssdpSchema()
+{
+#ifdef BLSF_SSDP
+    return SSDP.getSchema();
+#else
+    return "";
+#endif
+}
+
 }  // namespace blsf

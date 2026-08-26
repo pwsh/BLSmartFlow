@@ -16,6 +16,8 @@ void ssdpStart();
 // Non-blocking pump: applies a pending reconfigure and retries a failed start.
 // Call every loop iteration.
 void ssdpLoop();
+// UPnP device description XML for GET /description.xml (empty when SSDP is off).
+const char* ssdpSchema();
 // Requests a re-evaluation of config.ssdp.enabled. Only raises a flag - the
 // start/stop happens in ssdpLoop(), on the loop task.
 void ssdpReconfigure();

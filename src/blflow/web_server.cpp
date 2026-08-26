@@ -19,6 +19,7 @@
 #include "status.h"
 #include "version.h"
 #include "wifi_manager.h"
+#include "ssdp.h"
 
 // Generated at build time by pre_build.py from everything in src/www/.
 #include "../www/www.h"
@@ -560,7 +561,7 @@ void handleLegacyGetOptions(AsyncWebServerRequest* request)
     doc["staticfans"] = strcmp(c.fan.mode, "manual") == 0;
     doc["staticfanspeed"] = c.fan.manualSpeed;
     doc["debuging"] = c.debug.serial;
-    doc["debugingchange"] = c.debug.serial;
+    doc["debugingchange"] = false;   // 1.x-only flag, no 2.0 equivalent
     doc["mqttdebug"] = c.debug.mqttDump;
     sendJson(request, doc);
 }
@@ -649,19 +650,32 @@ void handleLegacySensorData(AsyncWebServerRequest* request)
 
 // --- captive portal --------------------------------------------------------
 
+// A captive-portal probe (or any stray request) from a client on the setup AP
+// is answered with a redirect to the portal. That redirect is what makes the
+// phone/laptop show its "sign in to network" prompt. Only clients on the AP
+// interface are redirected: in AP+STA mode (WiFi outage with saved credentials)
+// a genuine 404 on the LAN side must stay a 404.
+bool wantsPortal(AsyncWebServerRequest* request)
+{
+    return onApInterface(request);
+}
+
 void redirectToPortal(AsyncWebServerRequest* request)
 {
     AsyncWebServerResponse* r = request->beginResponse(302, "text/plain", "");
-    r->addHeader("Location", "http://192.168.4.1/");
+    r->addHeader("Location", "http://" + WiFi.softAPIP().toString() + "/");
+    // Probe responses must never be cached, or the OS keeps believing it is
+    // (or is not) behind a portal after the state changed.
+    r->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    r->addHeader("Pragma", "no-cache");
+    r->addHeader("Expires", "0");
     request->send(r);
 }
 
 void handleNotFound(AsyncWebServerRequest* request)
 {
     if (request->method() == HTTP_OPTIONS) { request->send(200); return; }
-    // Outside AP mode an unknown path is genuinely an error; inside it, sending
-    // the phone to the portal is what makes the "sign in to network" prompt work.
-    if (wifiIsApMode()) { redirectToPortal(request); return; }
+    if (wantsPortal(request)) { redirectToPortal(request); return; }
     sendError(request, 404, "not found");
 }
 
@@ -679,6 +693,12 @@ void webServerSetup()
 {
     g_server.on("/", HTTP_GET, handleIndex);
     g_server.on("/index.html", HTTP_GET, handleIndex);
+    // UPnP device description advertised by SSDP (Windows "Network", xtouch).
+    g_server.on("/description.xml", HTTP_GET, [](AsyncWebServerRequest* request) {
+        const char* xml = ssdpSchema();
+        if (!xml || !*xml) { sendError(request, 404, "ssdp disabled"); return; }
+        request->send(200, "text/xml", xml);
+    });
 
     g_server.on("/api/status", HTTP_GET, handleStatus);
     g_server.on("/api/info", HTTP_GET, handleInfo);
@@ -710,10 +730,11 @@ void webServerSetup()
     static const char* kProbes[] = {
         "/generate_204", "/gen_204", "/hotspot-detect.html", "/library/test/success.html",
         "/connecttest.txt", "/ncsi.txt", "/fwlink", "/redirect", "/success.txt", "/canonical.html",
+        "/check_network_status.txt", "/chat",   // NetworkManager / GNOME, Samsung
     };
     for (const char* p : kProbes) {
         g_server.on(p, HTTP_GET, [](AsyncWebServerRequest* request) {
-            if (wifiIsApMode()) redirectToPortal(request);
+            if (wantsPortal(request)) redirectToPortal(request);
             else sendError(request, 404, "not found");
         });
     }
