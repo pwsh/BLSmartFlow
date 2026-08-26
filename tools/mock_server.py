@@ -34,13 +34,221 @@ from urllib.parse import parse_qs, urlsplit
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 INDEX = os.path.join(ROOT, "src", "www", "index.html")
+FILAMENT_DB_H = os.path.join(ROOT, "src", "blflow", "filament_db.h")
+AMS_FIXTURE = os.path.join(ROOT, "test", "fixtures", "x1c_ams_trays.json")
 
 CHIP_ID = "a1b2c3"
-FW = "2.0.0"
-BUILD = "2026-08-25 12:00:00"
+FW = "2.0.2"
+BUILD = "2026-08-26 12:00:00"
 MASK = "********"
 SECRET_PATHS = (("wifi", "password"), ("printer", "accessCode"),
                 ("mqtt", "password"), ("web", "password"))
+
+# --------------------------------------------------------------------------
+# filament (spec section 16)
+# --------------------------------------------------------------------------
+# The mock reads the *generated header* rather than carrying its own copy of the
+# Filament Field Guide: one source of truth means the UI sees exactly the table
+# the firmware serves, and a regenerated database needs no change here.
+
+FIL_RE = re.compile(
+    r'^\s*\{"([^"]*)",\s*"([^"]*)",\s*(FCLASS_\w+),\s*(-?\d+),\s*(-?\d+),\s*(-?\d+),'
+    r'\s*(\d+),\s*(\d+),\s*0x([0-9A-Fa-f]+),\s*(\d+),\s*(\d+)\},\s*$')
+BAMBU_RE = re.compile(r'^\s*\{"([A-Z0-9]+)",\s*"([^"]*)"\},\s*$')
+
+VENT_NAMES = ("optional", "recommended", "required")
+LEVEL_NAMES = ("none", "low", "moderate", "high")
+FIL_ENCLOSURE, FIL_HEATED, FIL_OPEN_COOL, FIL_HARDENED = 1, 2, 4, 8
+TEMP_NA, PARTCOOL_NA = -1, 255
+
+
+def load_filament_db(path=FILAMENT_DB_H):
+    """Parses src/blflow/filament_db.h back into dicts."""
+    fils, bambu = [], {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                m = FIL_RE.match(line)
+                if m:
+                    fils.append({
+                        "id": m.group(1), "name": m.group(2),
+                        "cls": m.group(3)[len("FCLASS_"):].lower().replace("_", "-"),
+                        "cMin": int(m.group(4)), "cRec": int(m.group(5)), "cMax": int(m.group(6)),
+                        "cool": int(m.group(7)), "vent": int(m.group(8)),
+                        "flags": int(m.group(9), 16),
+                        "voc": int(m.group(10)), "part": int(m.group(11))})
+                    continue
+                m = BAMBU_RE.match(line)
+                if m:
+                    bambu[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return fils, bambu
+
+
+FILAMENTS, BAMBU_IDS = load_filament_db()
+BY_ID = {f["id"]: f for f in FILAMENTS}
+
+# Mirrors fmdetail::baseMap() in filament_match.h.
+BASE_MAP = {
+    "PLA": "pla", "PETG": "petg", "PCTG": "pctg", "ABS": "abs", "ASA": "asa", "PC": "pc",
+    "PA": "pa", "PAHT": "pa", "PA6": "pa6", "PA12": "pa12", "PA66": "pa66", "PPA": "ppa",
+    "TPU": "tpu", "TPE": "tpe", "PVA": "pva", "BVOH": "bvoh", "HIPS": "hips", "PET": "pet",
+    "PPS": "pps", "PP": "pp", "PE": "pe", "EVA": "eva", "PHA": "pha", "PMMA": "pmma",
+    "PVB": "pvb", "PBT": "pbt", "PPSU": "ppsu", "PEEK": "peek", "PEKK": "pekk",
+    "PEI": "pei-ultem",
+}
+PREFIX_MAP = [("GFA", "PLA"), ("GFL", "PLA"), ("GFB", "ABS"), ("GFC", "PC"), ("GFG", "PETG"),
+              ("GFN", "PA"), ("GFP", "PP"), ("GFT", "PPS"), ("GFU", "TPU")]
+
+
+def _norm(s):
+    return " ".join(str(s or "").replace("_", " ").upper().split())
+
+
+def _support_pair(t):
+    if "PLA" in t:
+        return "pla"
+    if "PA/PET" in t or "PET" in t:
+        return "pa"
+    if "ABS" in t or "ASA" in t:
+        return "abs"
+    if "SUPPORT W" in t:
+        return "pla"
+    if "SUPPORT G" in t:
+        return "pa"
+    if "PA" in t:
+        return "pa"
+    return ""
+
+
+def _identify_type(t):
+    """(id, family) for one normalised type string; id is '' when unmatched."""
+    if not t:
+        return "", ""
+    if t.startswith("SUPPORT"):
+        paired = _support_pair(t)
+        return (paired if paired in BY_ID else ""), t
+    base, _, mod = t.partition("-")
+    base_id = BASE_MAP.get(base)
+    if not base_id:
+        return "", t
+    if mod in ("CF", "GF"):
+        variant = "%s-%s" % (base_id, mod.lower())
+        if variant in BY_ID:
+            return variant, t
+    return (base_id if base_id in BY_ID else ""), t
+
+
+def identify(tray_type, sub_brands, tray_idx):
+    """Mirrors filamentIdentify() in filament_match.h (spec 16.2)."""
+    t = _norm(tray_type)
+    fid, family = _identify_type(t)
+    if fid:
+        return fid, family
+    fallback = (fid, family)
+    by_idx = BAMBU_IDS.get(_norm(tray_idx), "")
+    if by_idx:
+        fid, family = _identify_type(_norm(by_idx))
+        if fid:
+            return fid, family
+        if not fallback[1]:
+            fallback = (fid, family)
+    sb = _norm(sub_brands).split(" ")[0]
+    if sb:
+        fid, family = _identify_type(sb)
+        if fid:
+            return fid, family
+    idx = _norm(tray_idx)
+    for prefix, typ in PREFIX_MAP:
+        if idx.startswith(prefix):
+            fid, family = _identify_type(typ)
+            if fid:
+                return fid, family
+            break
+    return fallback
+
+
+def active_tray(tray_now):
+    """spec 16.2 step 5: tray_now -> (source, ams, slot)."""
+    if tray_now is None or tray_now < 0 or tray_now == 255:
+        return "none", -1, -1
+    if tray_now == 254:
+        return "external", -1, 254
+    if tray_now >= 128:
+        return "ams", tray_now, 0
+    return "ams", tray_now // 4, tray_now % 4
+
+
+def effective_profile(info, fil_cfg, fan_cfg):
+    """Mirrors filamentEffective() (spec 16.3)."""
+    e = {"chamberTarget": int(fan_cfg["chamberTarget"]),
+         "cooldownTarget": int(fan_cfg["cooldownTarget"]),
+         "ventFloor": 0, "postPrintCooling": "fast", "overridden": False}
+    keep_cool = False
+    if not fil_cfg.get("auto", True):
+        return e, keep_cool
+    if info:
+        keep_cool = bool(info["flags"] & FIL_OPEN_COOL) or (
+            info["cRec"] != TEMP_NA and info["cRec"] < 35)
+        target = info["cMax"] if keep_cool else info["cRec"]
+        if target == TEMP_NA:
+            target = info["cRec"] if keep_cool else info["cMax"]
+        if target != TEMP_NA:
+            e["chamberTarget"] = int(clamp(target, 20, 80))
+        if info["cool"] != PARTCOOL_NA and info["cool"] < 50:
+            e["postPrintCooling"] = "gentle"
+        vf = fil_cfg.get("ventFloor", {})
+        e["ventFloor"] = int(vf.get(VENT_NAMES[info["vent"]], 0))
+    for star in (True, False):
+        for r in fil_cfg.get("overrides", []):
+            rid = r.get("id") or ""
+            if (rid == "*") != star:
+                continue
+            if not star and (not info or rid != info["id"]):
+                continue
+            if r.get("chamberTarget") is not None:
+                e["chamberTarget"] = int(clamp(r["chamberTarget"], 20, 80))
+                e["overridden"] = True
+            if r.get("cooldownTarget") is not None:
+                e["cooldownTarget"] = int(clamp(r["cooldownTarget"], 15, 60))
+                e["overridden"] = True
+            if r.get("ventFloor") is not None:
+                e["ventFloor"] = int(clamp(r["ventFloor"], 0, 100))
+                e["overridden"] = True
+            if r.get("postPrintCooling") in ("fast", "gentle"):
+                e["postPrintCooling"] = r["postPrintCooling"]
+                e["overridden"] = True
+    return e, keep_cool
+
+
+def load_ams_fixture():
+    """The fake AMS is the real X1C capture in test/fixtures/x1c_ams_trays.json."""
+    try:
+        with open(AMS_FIXTURE, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}, None, 0
+    pr = doc.get("print", {})
+    ams = pr.get("ams", {})
+    trays = {}
+    for unit in ams.get("ams", []):
+        uid = int(unit.get("id", 0))
+        for tr in unit.get("tray", []):
+            trays[(uid, int(tr.get("id", 0)))] = {
+                "type": tr.get("tray_type", ""), "subBrand": tr.get("tray_sub_brands", ""),
+                "idx": tr.get("tray_info_idx", ""), "color": tr.get("tray_color", "")}
+    vt = pr.get("vt_tray")
+    external = None
+    if vt:
+        external = {"type": vt.get("tray_type", ""), "subBrand": vt.get("tray_sub_brands", ""),
+                    "idx": vt.get("tray_info_idx", ""), "color": vt.get("tray_color", "")}
+    try:
+        now = int(ams.get("tray_now", "255"))
+    except ValueError:
+        now = 255
+    return trays, external, now
+
 
 # --------------------------------------------------------------------------
 # configuration (spec section 5 defaults)
@@ -75,6 +283,10 @@ def default_config():
         "web": {"authEnabled": False, "user": "admin", "password": ""},
         "debug": {"serial": True, "mqttDump": False},
         "ssdp": {"enabled": True},
+        # filament-aware cooling (spec 16.3)
+        "filament": {"auto": True, "manualId": "",
+                     "ventFloor": {"optional": 0, "recommended": 0, "required": 10},
+                     "overrides": []},
         # learned cooling constants: 5 closed buckets then 5 open ones, null = unmeasured
         "thermal": {"k": [None] * 10, "samples": 0},
     }
@@ -197,6 +409,29 @@ def validate_config(cfg):
     if "hostname" in w:
         h = re.sub(r"[^a-z0-9-]", "", str(w["hostname"]).lower())[:32]
         w["hostname"] = h or "blsmartflow"
+
+    fil = cfg.setdefault("filament", {})
+    fil.setdefault("auto", True)
+    fil.setdefault("manualId", "")
+    if fil["manualId"] and fil["manualId"] not in BY_ID:
+        fil["manualId"] = ""
+    vf = fil.setdefault("ventFloor", {})
+    for k in VENT_NAMES:
+        vf[k] = int(clamp(int(vf.get(k, 0) or 0), 0, 100))
+    ov = []
+    for r in (fil.get("overrides") or [])[:12]:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        ov.append({"id": str(r["id"])[:23],
+                   "chamberTarget": None if r.get("chamberTarget") is None
+                   else int(clamp(int(r["chamberTarget"]), 20, 80)),
+                   "cooldownTarget": None if r.get("cooldownTarget") is None
+                   else int(clamp(int(r["cooldownTarget"]), 15, 60)),
+                   "ventFloor": None if r.get("ventFloor") is None
+                   else int(clamp(int(r["ventFloor"]), 0, 100)),
+                   "postPrintCooling": r.get("postPrintCooling")
+                   if r.get("postPrintCooling") in ("fast", "gentle") else None})
+    fil["overrides"] = ov
 
     m = cfg.setdefault("mqtt", {})
     _clamp_num(m, "publishIntervalSec", 1, 3600, int)
@@ -331,6 +566,17 @@ class Sim:
         self.door_edges = 0
         self.last_door_open = 0.0
         self.last_door_close = 0.0
+        # filament / AMS (spec 16): the fake AMS is the captured X1C block, with
+        # tray_now pointing at slot 0 (ABS) unless --filament says otherwise.
+        self.trays, self.vt_tray, self.tray_now = load_ams_fixture()
+        if getattr(args, "filament", None):
+            src, ams, slot = active_tray(self.tray_now)
+            key = (ams, slot) if src == "ams" else None
+            tray = self.trays.get(key) if key else self.vt_tray
+            if tray:
+                tray["type"] = args.filament.upper()
+                tray["idx"] = ""            # a type with no Bambu id: third-party spool
+                tray["subBrand"] = ""
         self.progress = 0.0
         self.layer = 0
         self.total_layers = 210
@@ -527,6 +773,66 @@ class Sim:
             return max(t["nozzle"], t["bed"], t["chamber"])
         return t["nozzle"]
 
+    # ---------------- filament (spec section 16) ----------------
+    def active_tray_record(self):
+        """(source, ams, slot, tray dict or None)."""
+        if not self.printer_connected:
+            return "none", -1, -1, None
+        src, ams, slot = active_tray(self.tray_now)
+        if src == "ams":
+            return src, ams, slot, self.trays.get((ams, slot))
+        if src == "external":
+            return src, ams, slot, self.vt_tray
+        return src, ams, slot, None
+
+    def filament(self):
+        """The `filament` status block plus the effective profile the fan uses."""
+        fil_cfg, fan_cfg = self.cfg["filament"], self.cfg["fan"]
+        src, ams, slot, tray = self.active_tray_record()
+        fid, family = ("", "")
+        if tray and (tray.get("type") or tray.get("idx")):
+            fid, family = identify(tray.get("type"), tray.get("subBrand"), tray.get("idx"))
+        else:
+            tray = None
+        info = BY_ID.get(fid)
+        if not info and fil_cfg.get("manualId"):
+            info = BY_ID.get(fil_cfg["manualId"])
+            if info:
+                fid = info["id"]
+                family = family or info["name"]
+                if tray is None:
+                    src, ams, slot = "manual", -1, -1
+        eff, _keep = effective_profile(info, fil_cfg, fan_cfg)
+
+        def entry(a, sl, t):
+            i, _f = identify(t.get("type"), t.get("subBrand"), t.get("idx"))
+            return {"ams": a, "slot": sl, "type": t.get("type") or None,
+                    "subBrand": t.get("subBrand") or None, "idx": t.get("idx") or None,
+                    "color": t.get("color") or None, "id": i or None}
+
+        trays = [entry(a, sl, t) for (a, sl), t in sorted(self.trays.items())
+                 if t.get("type") or t.get("idx")]
+        if self.vt_tray and (self.vt_tray.get("type") or self.vt_tray.get("idx")):
+            trays.append(entry(-1, 254, self.vt_tray))
+        return {
+            "source": src, "auto": bool(fil_cfg.get("auto", True)),
+            "tray": ({"ams": ams, "slot": slot, "type": tray.get("type") or None,
+                      "subBrand": tray.get("subBrand") or None,
+                      "idx": tray.get("idx") or None,
+                      "color": tray.get("color") or None} if tray else None),
+            "id": fid or None,
+            "name": info["name"] if info else None,
+            "family": family or None,
+            "profile": ({"chamberRec": None if info["cRec"] == TEMP_NA else info["cRec"],
+                         "chamberMax": None if info["cMax"] == TEMP_NA else info["cMax"],
+                         "partCoolRec": None if info["cool"] == PARTCOOL_NA else info["cool"],
+                         "vent": VENT_NAMES[info["vent"]],
+                         "openForCooling": bool(info["flags"] & FIL_OPEN_COOL),
+                         "heatedRequired": bool(info["flags"] & FIL_HEATED)} if info else None),
+            "effective": eff,
+            "trays": trays,
+        }
+
     # ---------------- fan (spec section 6) ----------------
     def tick_fan(self, dt):
         f = self.cfg["fan"]
@@ -539,9 +845,11 @@ class Sim:
             BUS.log("I", "manual override expired -> auto")
 
         phase = self.phase()
+        # spec 16.3: the filament decides the set points unless it is switched off
+        eff = self.filament()["effective"]
         recent_print = (not self.printing() and self.print_end_at
                         and now - self.print_end_at < f["cooldownMin"] * 60)
-        chamber_cool = self.chamber <= f["cooldownTarget"]
+        chamber_cool = self.chamber <= eff["cooldownTarget"]
 
         # 3. door: nothing to exhaust while the printer is open, and the
         #    rule stays armed for doorResumeSec after it closes. During a
@@ -558,9 +866,9 @@ class Sim:
         sp = None
         if thermostat:
             if phase in ("preheat", "printing", "paused"):
-                sp = float(f["chamberTarget"])
+                sp = float(eff["chamberTarget"])
             elif cooling_phase:
-                sp = float(f["cooldownTarget"])
+                sp = float(eff["cooldownTarget"])
 
         if f["mode"] == "off":
             mode, tgt = "off", 0.0
@@ -590,6 +898,15 @@ class Sim:
                 mode, tgt = "idle", 0.0
         else:
             mode, tgt = "auto", self._curve_target(st, f)
+
+        # spec 16.3: gentle post-print cooling, then the ventilation floor.
+        if eff["postPrintCooling"] == "gentle" and mode == "cooldown":
+            tgt = 0.0 if self.chamber > eff["chamberTarget"] - 10 else min(tgt, 50.0)
+        vent_floor_applies = (eff["ventFloor"] > 0 and self.printing()
+                              and f["mode"] not in ("off", "manual")
+                              and mode not in ("door", "preheat", "stale"))
+        if vent_floor_applies:
+            tgt = max(tgt, float(eff["ventFloor"]))
 
         if mode not in ("chamber", "cooldown") or sp is None:
             self.pi_integral, self.pi_setpoint, self.pi_out, self.pi_last = 0.0, None, 0.0, 0.0
@@ -741,6 +1058,7 @@ class Sim:
                         if self.manual_expires else 0,
                         "pwmDuty": self.pwm_duty(), "output1": f["output1"],
                         "output2": f["output2"]},
+                "filament": self.filament(),
                 # NaN is never emitted: an unmeasured bucket is JSON null
                 "thermal": {"rateCPerMin": self.rate_c_per_min,
                             "kClosed": [round(k, 3) if k is not None else None
@@ -894,6 +1212,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 return self.wfile.write(body)
+            if p == "/api/filaments":
+                return self._send({
+                    "count": len(FILAMENTS),
+                    "source": "https://pwsh.github.io/filament-field-guide",
+                    "licence": "CC BY 4.0",
+                    "filaments": [{"id": x["id"], "name": x["name"], "cls": x["cls"],
+                                   "cMin": None if x["cMin"] == TEMP_NA else x["cMin"],
+                                   "cRec": None if x["cRec"] == TEMP_NA else x["cRec"],
+                                   "cMax": None if x["cMax"] == TEMP_NA else x["cMax"],
+                                   "cool": None if x["cool"] == PARTCOOL_NA else x["cool"],
+                                   "vent": VENT_NAMES[x["vent"]], "flags": x["flags"],
+                                   "voc": LEVEL_NAMES[x["voc"]],
+                                   "part": LEVEL_NAMES[x["part"]]} for x in FILAMENTS]})
             if p == "/api/events":
                 return self._sse()
             if p == "/sensorData":            # legacy 1.x
@@ -970,6 +1301,18 @@ class Handler(BaseHTTPRequestHandler):
                                    "doorOpen": st["doorOpen"],
                                    "doorKnown": st["doorKnown"],
                                    "doorEdgeCount": st["doorEdgeCount"]})
+            if p == "/mock/tray":
+                # Not part of the device API: stands in for the printer switching
+                # to another tray, so the filament card can be exercised.
+                b = self._json_body()
+                with sim.lock:
+                    try:
+                        sim.tray_now = int(b.get("now", 255))
+                    except (TypeError, ValueError):
+                        return self._err("now must be 0..15, 254 or 255")
+                    fil = sim.filament()
+                BUS.log("I", "mock: tray_now=%d (%s)" % (sim.tray_now, fil["name"] or "unknown"))
+                return self._send({"ok": True, "trayNow": sim.tray_now, "filament": fil})
             if p in ("/api/update", "/update"):
                 return self._ota()
             if p == "/submitOptions":         # legacy 1.x form route
@@ -1231,6 +1574,8 @@ def main():
     ap.add_argument("--offline", action="store_true", help="printer never connects")
     ap.add_argument("--door", action="store_true",
                     help="start with the door reported open (POST /mock/door toggles it)")
+    ap.add_argument("--filament", default="", metavar="TYPE",
+                    help="override the loaded tray's material, e.g. --filament ABS")
     ap.add_argument("--auth", default="", metavar="USER:PASS", help="require basic auth")
     args = ap.parse_args()
 

@@ -199,6 +199,18 @@ void configDefaults(Config& c)
     for (uint8_t i = 0; i < 5; i++) c.thermal.kClosed[i] = c.thermal.kOpen[i] = NAN;
     c.thermal.samples = 0;
 
+    // Filament-aware cooling is on by default: it only ever *reads* what the
+    // printer already knows, and the numbers it picks are the ones the material
+    // wants. The one thing it can do on its own initiative is hold a ventilation
+    // floor, and that stays at zero except for the materials whose fumes the
+    // guide calls a health matter (ABS/ASA/PC and the filled grades).
+    c.filament.autoDetect = true;
+    c.filament.manualId[0] = '\0';
+    c.filament.ventFloor[VENT_OPTIONAL] = 0;
+    c.filament.ventFloor[VENT_RECOMMENDED] = 0;
+    c.filament.ventFloor[VENT_REQUIRED] = 10;
+    c.filament.overrideCount = 0;
+
     c.mqtt.enabled = false;
     c.mqtt.port = 1883;
     c.mqtt.haDiscovery = true;
@@ -298,6 +310,35 @@ void configValidate(Config& c)
         }
     }
 
+    // --- filament ---
+    for (uint8_t i = 0; i < 3; i++) c.filament.ventFloor[i] = clampVal<uint8_t>(c.filament.ventFloor[i], 0, 100);
+    // A manual id that is not in the guide would silently never match, which
+    // looks exactly like a broken feature; drop it instead.
+    if (c.filament.manualId[0] != '\0' && !filamentInfoById(c.filament.manualId)) {
+        LOGW("filament: unknown manual id '%s', cleared", c.filament.manualId);
+        c.filament.manualId[0] = '\0';
+    }
+    if (c.filament.overrideCount > FILAMENT_MAX_OVERRIDES) c.filament.overrideCount = FILAMENT_MAX_OVERRIDES;
+    uint8_t keep = 0;
+    for (uint8_t i = 0; i < c.filament.overrideCount; i++) {
+        FilamentOverrideRule& r = c.filament.overrides[i];
+        if (r.id[0] == '\0') continue;                     // an empty key matches nothing
+        // < 0 is the "leave this one alone" sentinel and must survive clamping.
+        if (r.chamberTarget >= 0)  r.chamberTarget = clampVal<int16_t>(r.chamberTarget, 20, 80);
+        else                       r.chamberTarget = -1;
+        if (r.cooldownTarget >= 0) r.cooldownTarget = clampVal<int16_t>(r.cooldownTarget, 15, 60);
+        else                       r.cooldownTarget = -1;
+        if (r.ventFloor >= 0)      r.ventFloor = clampVal<int16_t>(r.ventFloor, 0, 100);
+        else                       r.ventFloor = -1;
+        if (r.cooling > FIL_COOLING_GENTLE) r.cooling = FIL_COOLING_KEEP;
+        if (keep != i) c.filament.overrides[keep] = r;
+        keep++;
+    }
+    for (uint8_t i = keep; i < FILAMENT_MAX_OVERRIDES; i++) {
+        memset(&c.filament.overrides[i], 0, sizeof(c.filament.overrides[i]));
+    }
+    c.filament.overrideCount = keep;
+
     // --- mqtt ---
     if (c.mqtt.port == 0) c.mqtt.port = 1883;
     c.mqtt.publishIntervalSec = clampVal<uint16_t>(c.mqtt.publishIntervalSec, 1, 3600);
@@ -343,6 +384,84 @@ void curveFromJson(JsonArrayConst arr, FanCurve& out)
     }
     if (curveValidate(tmp)) out = tmp;
     // Otherwise `out` keeps whatever it had (defaults or the previous curve).
+}
+
+// --- filament (REWORK-SPEC 16.3) ------------------------------------------
+// An override field is tri-state: absent or null means "keep whatever the guide
+// said", a number means "use this". -1 is the in-memory spelling of null.
+int16_t optNum(JsonVariantConst v)
+{
+    if (!v.is<float>()) return -1;
+    const double d = v.as<double>();
+    if (isnan(d) || d < 0) return -1;
+    return (int16_t)(d > 32767.0 ? 32767 : d);
+}
+
+uint8_t coolingFromJson(JsonVariantConst v)
+{
+    if (!v.is<const char*>()) return FIL_COOLING_KEEP;
+    const char* s = v.as<const char*>();
+    if (!s) return FIL_COOLING_KEEP;
+    if (strcasecmp(s, "gentle") == 0) return FIL_COOLING_GENTLE;
+    if (strcasecmp(s, "fast") == 0) return FIL_COOLING_FAST;
+    return FIL_COOLING_KEEP;
+}
+
+// The overrides array is replaced wholesale, like the curve: merging a list by
+// index would make "delete the second rule" impossible to express.
+void filamentFromJson(JsonObjectConst in, FilamentConfig& f)
+{
+    if (in.isNull()) return;
+    if (in["auto"].is<bool>()) f.autoDetect = in["auto"].as<bool>();
+    copyIfString(in, "manualId", f.manualId, sizeof(f.manualId));
+    JsonObjectConst vf = in["ventFloor"];
+    if (!vf.isNull()) {
+        f.ventFloor[VENT_OPTIONAL]    = vf["optional"]    | f.ventFloor[VENT_OPTIONAL];
+        f.ventFloor[VENT_RECOMMENDED] = vf["recommended"] | f.ventFloor[VENT_RECOMMENDED];
+        f.ventFloor[VENT_REQUIRED]    = vf["required"]    | f.ventFloor[VENT_REQUIRED];
+    }
+    JsonArrayConst ov = in["overrides"];
+    if (ov.isNull()) return;
+    uint8_t n = 0;
+    for (JsonObjectConst o : ov) {
+        if (n >= FILAMENT_MAX_OVERRIDES) break;
+        const char* id = o["id"] | "";
+        if (!id || !*id) continue;
+        FilamentOverrideRule& r = f.overrides[n];
+        memset(&r, 0, sizeof(r));
+        strlcpy(r.id, id, sizeof(r.id));
+        r.chamberTarget = optNum(o["chamberTarget"]);
+        r.cooldownTarget = optNum(o["cooldownTarget"]);
+        r.ventFloor = optNum(o["ventFloor"]);
+        r.cooling = coolingFromJson(o["postPrintCooling"]);
+        n++;
+    }
+    for (uint8_t i = n; i < FILAMENT_MAX_OVERRIDES; i++) memset(&f.overrides[i], 0, sizeof(f.overrides[i]));
+    f.overrideCount = n;
+}
+
+void filamentToJson(JsonObject out, const FilamentConfig& f)
+{
+    out["auto"] = f.autoDetect;
+    out["manualId"] = String(f.manualId);
+    JsonObject vf = out["ventFloor"].to<JsonObject>();
+    vf["optional"] = f.ventFloor[VENT_OPTIONAL];
+    vf["recommended"] = f.ventFloor[VENT_RECOMMENDED];
+    vf["required"] = f.ventFloor[VENT_REQUIRED];
+    JsonArray ov = out["overrides"].to<JsonArray>();
+    for (uint8_t i = 0; i < f.overrideCount; i++) {
+        const FilamentOverrideRule& r = f.overrides[i];
+        JsonObject o = ov.add<JsonObject>();
+        o["id"] = String(r.id);
+        // null, not 0: "do not touch the chamber target" and "hold it at 0 C"
+        // are very different instructions.
+        if (r.chamberTarget >= 0) o["chamberTarget"] = r.chamberTarget; else o["chamberTarget"] = nullptr;
+        if (r.cooldownTarget >= 0) o["cooldownTarget"] = r.cooldownTarget; else o["cooldownTarget"] = nullptr;
+        if (r.ventFloor >= 0) o["ventFloor"] = r.ventFloor; else o["ventFloor"] = nullptr;
+        if (r.cooling == FIL_COOLING_GENTLE) o["postPrintCooling"] = "gentle";
+        else if (r.cooling == FIL_COOLING_FAST) o["postPrintCooling"] = "fast";
+        else o["postPrintCooling"] = nullptr;
+    }
 }
 
 // Reads a config document into `c`, treating every key as optional.
@@ -408,6 +527,7 @@ void applyDocument(JsonObjectConst root, Config& c)
         }
         c.thermal.samples = th["samples"] | c.thermal.samples;
     }
+    filamentFromJson(root["filament"], c.filament);
     JsonObjectConst m = root["mqtt"];
     if (!m.isNull()) {
         c.mqtt.enabled = m["enabled"] | c.mqtt.enabled;
@@ -624,6 +744,8 @@ void configToJson(JsonObject out, const Config& c, bool masked)
     JsonObject s = out["ssdp"].to<JsonObject>();
     s["enabled"] = c.ssdp.enabled;
 
+    filamentToJson(out["filament"].to<JsonObject>(), c.filament);
+
     JsonObject th = out["thermal"].to<JsonObject>();
     JsonArray k = th["k"].to<JsonArray>();
     // ArduinoJson serialises NaN as null, which is exactly what "never measured"
@@ -689,6 +811,14 @@ void configFromJson(JsonObjectConst in, Config& c, ConfigChange& change)
         ch |= mergeNum<uint8_t>(f, "thermostatPeriodSec", c.fan.thermostatPeriodSec);
         ch |= mergeNum<uint8_t>(f, "ambientTemp", c.fan.ambientTemp);
         if (ch) change.fanChanged = true;
+    }
+
+    JsonObjectConst fil = in["filament"];
+    if (!fil.isNull()) {
+        // Everything here feeds the fan controller's set points, so a change is a
+        // fan change: it takes effect on the next control tick, no restart.
+        filamentFromJson(fil, c.filament);
+        change.fanChanged = true;
     }
 
     JsonObjectConst m = in["mqtt"];

@@ -3,6 +3,7 @@
 #include <math.h>
 
 #include "config.h"
+#include "filament.h"
 #include "log.h"
 #include "printer_link.h"
 #include "state.h"
@@ -205,12 +206,23 @@ void fanControlLoop()
     // task can rewrite the curve or the mode part-way through this tick, and a
     // half-old, half-new view of the config is how fans end up at the wrong speed.
     FanConfig fc;
+    FilamentConfig filcfg;
     {
         ConfigGuard guard;
         fc = cfg().fan;
+        filcfg = cfg().filament;
     }
     const PrinterState p = printerSnapshot();
     FanState f = fanSnapshot();
+
+    // --- filament-aware set points (REWORK-SPEC 16.3) ---
+    // Resolved every tick from the snapshot, so a tool change mid-print moves the
+    // set point on the next 100 ms pass with no cache to invalidate. With
+    // `filament.auto` off this returns the plain fan.* values, which is how the
+    // whole feature disappears when the user does not want it.
+    const FilamentStatus fil = filamentResolve(p, filcfg, fc);
+    const uint8_t effChamberTarget = fil.eff.chamberTarget;
+    const uint8_t effCooldownTarget = fil.eff.cooldownTarget;
 
     // --- print phase (REWORK-SPEC 15.1) and the cooldown window ---
     const Phase phase = printerPhase(p);
@@ -248,7 +260,7 @@ void fanControlLoop()
     // ten minutes when it is already cold (REWORK-SPEC 15.3 step 6).
     const bool recentPrint = !printing && g_printEndedMs != 0 &&
                              (now - g_printEndedMs) < (uint32_t)fc.cooldownMin * 60000UL;
-    const bool chamberCool = !isnan(p.chamber) && p.chamber <= (float)fc.cooldownTarget;
+    const bool chamberCool = !isnan(p.chamber) && p.chamber <= (float)effCooldownTarget;
     const bool cooling = fc.onlyWhilePrinting && recentPrint && !chamberCool;
 
     // --- door rule (step 3) --------------------------------------------------
@@ -282,8 +294,8 @@ void fanControlLoop()
                                     (phase == Phase::Idle && recentPrint);
     float setpoint = NAN;
     if (thermostatUsable) {
-        if (phaseIsPrinting(phase))    setpoint = (float)fc.chamberTarget;
-        else if (thermostatCooldown)   setpoint = (float)fc.cooldownTarget;
+        if (phaseIsPrinting(phase))    setpoint = (float)effChamberTarget;
+        else if (thermostatCooldown)   setpoint = (float)effCooldownTarget;
     }
 
     const char* eff;
@@ -321,13 +333,16 @@ void fanControlLoop()
         // a PI loop on an enclosure that takes minutes to respond has nothing to
         // gain from running ten times a second, and a long dt is what makes the
         // integral term readable in percent per degree-second.
-        if (isnan(g_lastSetpoint) || fabsf(setpoint - g_lastSetpoint) > 0.01f) {
-            // Switching between print and cool-down set points is a new regime;
-            // carrying the old integral over would dump a step into the output.
+        // A big move - print set point to cool-down, or a tool change from ABS to
+        // PLA - is a new regime and the old integral would dump a step into the
+        // output. A small one (an override nudging 50 C to 48 C) is not worth
+        // throwing away minutes of accumulated correction for, hence the 5 C
+        // threshold from REWORK-SPEC 16.3 rather than "any change at all".
+        if (isnan(g_lastSetpoint) || fabsf(setpoint - g_lastSetpoint) > 5.0f) {
             thermostatReset(g_pi);
-            g_lastSetpoint = setpoint;
             g_lastThermostatMs = 0;
         }
+        g_lastSetpoint = setpoint;
         const uint32_t periodMs = (uint32_t)fc.thermostatPeriodSec * 1000UL;
         if (g_lastThermostatMs == 0 || (now - g_lastThermostatMs) >= periodMs) {
             const float dtSec = g_lastThermostatMs == 0
@@ -364,6 +379,30 @@ void fanControlLoop()
         g_lastSetpoint = NAN;
     }
     f.setpoint = thermostatRan ? setpoint : NAN;
+
+    // --- filament: gentle cool-down (REWORK-SPEC 16.3) ---
+    // A material the guide prints with the part fan off (ABS, ASA, PC) is the
+    // one that cracks when the chamber is emptied the second the print ends. So
+    // while the chamber is still anywhere near print temperature the fan stays
+    // off, and once it is 10 C below that it is allowed half speed at most.
+    if (fil.eff.gentle && strcmp(eff, "cooldown") == 0) {
+        const float hold = (float)effChamberTarget - 10.0f;
+        if (!isnan(p.chamber) && p.chamber > hold) target = 0.0f;
+        else if (target > 50.0f) target = 50.0f;
+    }
+
+    // --- filament: ventilation floor (REWORK-SPEC 16.3) ---
+    // A minimum output while a print is actually running, so the fumes of a
+    // material the guide says needs ventilation are still moving even when the
+    // curve or the thermostat is asking for nothing. It never overrides a rule
+    // that deliberately wants the fan stopped (door, preheat, the stale failsafe)
+    // and never applies in off/manual, where the user has taken control.
+    const bool ventFloorApplies =
+        fil.eff.ventFloor > 0 && printing &&
+        strcmp(fc.mode, "off") != 0 && strcmp(fc.mode, "manual") != 0 &&
+        strcmp(eff, "door") != 0 && strcmp(eff, "preheat") != 0 && strcmp(eff, "stale") != 0;
+    if (ventFloorApplies && target < (float)fil.eff.ventFloor) target = (float)fil.eff.ventFloor;
+
     if (target < 0.0f) target = 0.0f;
     if (target > 100.0f) target = 100.0f;
     f.target = target;

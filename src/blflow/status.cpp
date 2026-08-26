@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "fan_control.h"
+#include "filament.h"
 #include "ha_mqtt.h"
 #include "printer_link.h"
 #include "state.h"
@@ -137,6 +138,11 @@ void buildStatus(JsonObject out)
     fo["pwmDuty"] = f.pwmDuty;
     fo["output1"] = c.fan.output1;
     fo["output2"] = c.fan.output2;
+
+    // What is loaded and what the fan is doing about it (REWORK-SPEC 16.4). Built
+    // from the same snapshot as the fan block above, so the effective targets it
+    // reports are the ones the control loop is using this second.
+    filamentToJson(out["filament"].to<JsonObject>(), p, c.filament, c.fan);
 
     thermalToJson(out["thermal"].to<JsonObject>());
 

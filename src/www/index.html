@@ -216,6 +216,10 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
 #tip.on{display:block}
 .prog{height:10px;border-radius:5px;background:var(--card2);border:1px solid var(--line);overflow:hidden;margin-top:10px}
 .prog>i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+.fsw{width:38px;height:38px;border-radius:9px;border:1px solid var(--line);flex:none;
+  background:var(--card2) linear-gradient(45deg,transparent 46%,var(--line) 46%,var(--line) 54%,transparent 54%)}
+.fdot{display:inline-block;width:11px;height:11px;border-radius:3px;border:1px solid var(--line);
+  vertical-align:-1px;margin-right:6px;background:var(--card2)}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 .nowrap{white-space:nowrap}
 </style>
@@ -318,13 +322,14 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
     </div>
 
     <div class="card">
-      <header><h3>Print job</h3><span class="grow"></span><span class="badge" id="phaseChip" data-tip="What the printer is doing, worked out from its state, its current stage and its temperature targets. This - not the raw state - is what the door and preheat rules and the thermostat react to.">-</span><span class="badge" id="doorChip" data-tip="The front-door switch. The top lid has no sensor at all.">-</span><span class="badge" id="stateBadge">-</span></header>
+      <header><h3>Print job</h3><span class="grow"></span><span class="badge" id="phaseChip" data-tip="What the printer is doing, worked out from its state, its current stage and its temperature targets. This - not the raw state - is what the door and preheat rules and the thermostat react to.">-</span><span class="badge" id="filChip" hidden data-tip="The material in the tray the printer is feeding from.">-</span><span class="badge" id="doorChip" data-tip="The front-door switch. The top lid has no sensor at all.">-</span><span class="badge" id="stateBadge">-</span></header>
       <div class="row" style="justify-content:space-between"><b id="jobName" style="overflow-wrap:anywhere">No active job</b><span class="mono" id="jobPct">0 %</span></div>
       <div class="bar" style="margin:8px 0 10px"><i id="jobBar"></i></div>
       <dl class="kv">
         <dt>Stage</dt><dd id="jobStage">-</dd>
         <dt>Remaining</dt><dd id="jobRem">-</dd>
         <dt>Layer</dt><dd id="jobLayer">-</dd>
+        <dt>Filament</dt><dd id="jobFil">-</dd>
         <dt>Door</dt><dd id="jobDoor">-</dd>
         <dt>Printer WiFi</dt><dd id="jobPwifi">-</dd>
       </dl>
@@ -427,6 +432,77 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
           <div class="field"><label for="f-ambient">Room temperature <span class="unit">&deg;C</span> <button class="qm" type="button" data-tip="Roughly how warm the room is. It is not used to control the fan; it is the baseline for the cooling-rate figures on the dashboard, because a chamber can never be cooled below the air being blown into it. Range 0-40 &deg;C.">?</button></label>
             <input type="number" id="f-ambient" data-path="fan.ambientTemp" min="0" max="40" step="1" data-tip="Assumed room temperature, 0-40 &deg;C. Used only for the cooling-rate estimate."></div>
         </div>
+      </details>
+    </div>
+
+    <div class="card" id="filCard">
+      <header><h3>Filament</h3><span class="grow"></span><span class="badge" id="filBadge" data-tip="What the printer says is loaded in the tray it is printing from, and whether the guide has an entry for it. Everything in this card follows the active tray, so a multi-material print moves it as the printer swaps.">-</span></header>
+      <div class="row" style="gap:11px;margin-bottom:11px;flex-wrap:nowrap">
+        <span class="fsw" id="filSwatch" aria-hidden="true"></span>
+        <div style="flex:1 1 auto;min-width:0">
+          <b id="filName" style="font-size:15px;overflow-wrap:anywhere">Waiting for the printer&hellip;</b>
+          <div class="hint" id="filWhere" style="margin:2px 0 0">No filament reported yet.</div>
+        </div>
+      </div>
+      <dl class="kv" id="filKv">
+        <dt data-tip="The Filament Field Guide entry this tray was matched to, and its polymer family. A filled grade falls back to the unfilled polymer when the guide has no entry of its own - the fibre changes the stiffness, not the temperature the enclosure wants.">Guide entry</dt><dd id="filGuide">-</dd>
+        <dt data-tip="The ambient temperature the guide recommends for this material, and the top of its usable band. Materials that want to be cooled are held at the top of the band rather than driven to the middle of it.">Chamber</dt><dd id="filChamber">-</dd>
+        <dt data-tip="The part-cooling fan setting the guide recommends, on the printer's own fan. Below 50 % it also decides the cool-down style here: a material printed with the part fan off is one that cracks if the chamber is emptied the moment the print ends.">Part cooling</dt><dd id="filCool">-</dd>
+        <dt data-tip="How badly the guide says the fumes need to go somewhere else. This picks the row of the ventilation-floor table below.">Ventilation</dt><dd id="filVent">-</dd>
+        <dt data-tip="What the guide says the enclosure should be doing for this material: open so the part can cool, or closed to hold the heat in. 'Heated chamber required' means the material needs an actively heated chamber, which an X1 or P1 does not have - the fan can only avoid making it worse.">Enclosure</dt><dd id="filEnc">-</dd>
+        <dt data-tip="How much this material gives off while printing: volatile organic compounds and ultrafine particles, on a none/low/moderate/high scale. This is where the ventilation demand comes from - 'high' on both is why ABS is not something to print in an occupied room.">Emissions</dt><dd id="filEmit">-</dd>
+      </dl>
+      <p class="hint" style="margin:9px 0 12px">Data: <a id="filLink" href="https://pwsh.github.io/filament-field-guide/" target="_blank" rel="noopener">Filament Field Guide</a> (CC BY 4.0)</p>
+
+      <div class="stats">
+        <div class="stat" data-tip="The chamber temperature the thermostat will hold while this material prints. For a material the guide says should be cooled - PLA, PETG, TPU - this is the warmest the chamber may get rather than a temperature to reach. Only used in Chamber thermostat mode."><div class="l">Chamber target</div><div class="v"><span id="filEffChamber">--</span><small> &deg;C</small></div></div>
+        <div class="stat" data-tip="The temperature the chamber is emptied down to after the print. It ends the cool-down in Curve mode too, so the fan stops as soon as the chamber is actually cold."><div class="l">Cool down to</div><div class="v"><span id="filEffCooldown">--</span><small> &deg;C</small></div></div>
+        <div class="stat" data-tip="A minimum fan output held while a print is running, so the fumes of a material that needs ventilation keep moving even when the curve or the thermostat is asking for nothing. It never overrides the door rule, the preheat rule or the stale-data failsafe."><div class="l">Vent floor</div><div class="v"><span id="filEffVent">--</span><small> %</small></div></div>
+        <div class="stat" data-tip="Fast: the fan runs the cool-down normally. Gentle: for materials the guide prints with the part fan off, the fan stays off until the chamber is 10 &deg;C below the print target and then runs at half speed at most - blasting cold air at a hot ABS part is what splits it."><div class="l">After the print</div><div class="v" style="font-size:16px"><span id="filEffCooling">--</span></div></div>
+      </div>
+
+      <div class="sw" style="margin-top:13px"><button type="button" role="switch" aria-checked="true" id="fil-auto" data-path="filament.auto" aria-labelledby="fil-auto-l" data-tip="Let the loaded filament set the chamber target, the cool-down behaviour and the ventilation floor. Switch it off and the fan uses the plain numbers from the Chamber thermostat card instead, whatever is loaded - the card above still shows what was detected."></button>
+        <span class="txt" id="fil-auto-l">Use the loaded filament<small>Chamber target, cool-down and vent floor follow the material in the active tray.</small></span></div>
+
+      <div class="field" style="margin-top:11px"><label for="fil-manual">Material when the printer reports none <button class="qm" type="button" data-tip="An external spool with no RFID tag, or a P1 with no AMS, tells the device nothing about what is loaded. Pick the material you normally print and it is used whenever the printer has nothing to say. A tray the printer does report always wins over this.">?</button></label>
+        <select id="fil-manual" data-path="filament.manualId" data-tip="Fallback material, used only when the printer reports no usable tray data. The list is the embedded Filament Field Guide table.">
+          <option value="">Nothing - leave the targets alone</option></select></div>
+
+      <details id="filOvBox" style="margin-top:6px"><summary style="cursor:pointer;font-size:13px;font-weight:600">Override for this material <span class="unit" id="filOvCount"></span></summary>
+        <p class="hint" style="margin:9px 0">Your numbers win over the guide. Leave a field empty to keep what the guide says. Use <b>Every material</b> for a rule that applies whatever is loaded - a material's own rule still beats it.</p>
+        <div class="field"><label for="fil-ov-id">Applies to</label>
+          <select id="fil-ov-id" data-tip="Which material this rule is for. Defaults to the one currently loaded; 'Every material' is the catch-all rule."><option value="*">Every material</option></select></div>
+        <div class="row">
+          <div class="field"><label for="fil-ov-ct">Chamber target <span class="unit">&deg;C</span></label>
+            <input type="number" id="fil-ov-ct" min="20" max="80" step="1" placeholder="guide" data-tip="Chamber set point for this material, 20-80 &deg;C. Empty means 'use the guide's figure'."></div>
+          <div class="field"><label for="fil-ov-cd">Cool down to <span class="unit">&deg;C</span></label>
+            <input type="number" id="fil-ov-cd" min="15" max="60" step="1" placeholder="default" data-tip="Cool-down target for this material, 15-60 &deg;C. Empty means 'use the value from the Chamber thermostat card'."></div>
+        </div>
+        <div class="row">
+          <div class="field"><label for="fil-ov-vf">Vent floor <span class="unit">%</span></label>
+            <input type="number" id="fil-ov-vf" min="0" max="100" step="1" placeholder="table" data-tip="Minimum output while printing this material, 0-100 %. Empty means 'use the ventilation-floor table below'."></div>
+          <div class="field"><label for="fil-ov-pc">After the print</label>
+            <select id="fil-ov-pc" data-tip="Force the post-print cooling style for this material instead of deriving it from the recommended part-cooling figure."><option value="">Guide default</option><option value="fast">Fast</option><option value="gentle">Gentle</option></select></div>
+        </div>
+        <div class="btns" style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm primary" type="button" id="filOvSave" data-tip="Stage this rule. It is written to the device when you press Save changes.">Apply rule</button>
+          <button class="btn sm" type="button" id="filOvClear" data-tip="Remove the rule for the selected material, so it follows the guide again.">Remove rule</button></div>
+        <div class="tablewrap" style="margin-top:10px"><table><thead><tr><th>Material</th><th>Chamber</th><th>Cool-down</th><th>Vent</th><th>After</th><th></th></tr></thead><tbody id="filOvRows"></tbody></table></div>
+      </details>
+
+      <details style="margin-top:4px"><summary style="cursor:pointer;font-size:13px;font-weight:600">Ventilation floor table</summary>
+        <p class="hint" style="margin:9px 0">The minimum fan output while printing, by how badly the guide says that material needs ventilation. <b>Bambu deliberately keeps the exhaust off</b> for warm-chamber materials like ABS and ASA, because the chamber heat is what stops them warping - so only raise these if your fan vents through a filter or out of the room. 0 disables the floor entirely.</p>
+        <div class="row">
+          <div class="field"><label for="fil-vf0">Optional <span class="unit">%</span></label>
+            <input type="number" id="fil-vf0" data-path="filament.ventFloor.optional" min="0" max="100" step="1" data-tip="Minimum output for materials the guide says need no particular ventilation (PLA, PVA). Normally 0."></div>
+          <div class="field"><label for="fil-vf1">Recommended <span class="unit">%</span></label>
+            <input type="number" id="fil-vf1" data-path="filament.ventFloor.recommended" min="0" max="100" step="1" data-tip="Minimum output for materials the guide recommends ventilating (PETG, PA, TPU). Normally 0."></div>
+          <div class="field"><label for="fil-vf2">Required <span class="unit">%</span></label>
+            <input type="number" id="fil-vf2" data-path="filament.ventFloor.required" min="0" max="100" step="1" data-tip="Minimum output for materials whose fumes the guide calls a health matter (ABS, ASA, PC, most filled grades). 10 % is a trickle that keeps styrene moving without emptying the chamber - but it only helps if the air goes somewhere useful."></div>
+        </div>
+      </details>
+
+      <details style="margin-top:4px"><summary style="cursor:pointer;font-size:13px;font-weight:600">All trays <span class="unit" id="filTrayCount"></span></summary>
+        <div class="tablewrap" style="margin-top:9px"><table><thead><tr><th>Slot</th><th>Material</th><th>Bambu id</th><th>Guide</th></tr></thead><tbody id="filTrayRows"></tbody></table></div>
       </details>
     </div>
 
@@ -737,6 +813,8 @@ const S = {
   page: "dashboard",
   lastStatus: 0,
   topicBase: null,
+  fildb: null,        // the embedded Filament Field Guide table (GET /api/filaments)
+  filById: null,
   wifiPassTouched: false,
   wifiFormTouched: false,   // the user is editing the network form - do not overwrite it
   logPaused: false
@@ -887,6 +965,7 @@ function applyConfig(cfg) {
     $("#wf-bssid").textContent = "BSSID: " + (cfg.wifi.bssid || "not set");
     S.wifiPassTouched = false;
   }
+  renderOverrideEditor();
   renderTopics();
 }
 function markDirty(path, val) { S.dirty[path] = val; updateSaveBar(); }
@@ -899,6 +978,7 @@ function updateSaveBar() {
       : n + " unsaved change" + (n > 1 ? "s" : ""));
 }
 function wireControls() {
+  $("#fil-ov-id").addEventListener("change", e => { e.target.dataset.touched = "1"; });
   bound().forEach(el => {
     if (el.getAttribute("role") === "switch") {
       el.addEventListener("click", () => {
@@ -1130,8 +1210,9 @@ function renderStatus(st) {
   $("#mqBadge").textContent = !st.mqttExt.enabled ? "disabled" : st.mqttExt.connected ? "connected" : "not connected";
   $("#mqBadge").className = "badge " + (!st.mqttExt.enabled ? "" : st.mqttExt.connected ? "ok" : "err");
   renderTopics();
-  /* --- thermal card --- */
+  /* --- thermal + filament cards --- */
   renderThermal(st);
+  renderFilament(st);
   /* --- fan mode selector on the curve page --- */
   $$("#modeSeg button").forEach(b => b.setAttribute("aria-pressed", b.dataset.mode === f.mode ? "true" : "false"));
   $("#modeNow").textContent = "now: " + (MODES[f.effectiveMode] || [f.effectiveMode])[0];
@@ -1170,6 +1251,180 @@ function renderThermal(st) {
   const cell = v => v == null ? "&ndash;" : (Math.round(v * 1000) / 1000).toFixed(3);
   $("#thRows").innerHTML = [0, 25, 50, 75, 100].map((pct, i) =>
     "<tr><td>" + pct + " %</td><td>" + cell(kc[i]) + "</td><td>" + cell(ko[i]) + "</td></tr>").join("");
+}
+
+/* --------------------------- filament -------------------------- */
+/* The guide table is fetched once (it is baked into the firmware and never
+   changes at runtime) and used for the two material pickers and for the extra
+   properties the status block does not carry. */
+const VENT_TEXT = {
+  optional: "optional - no particular need",
+  recommended: "recommended - ventilate if you can",
+  required: "required - do not run this in an unventilated room"
+};
+const filColor = c => (c && /^[0-9a-fA-F]{6,8}$/.test(c)) ? "#" + c.slice(0, 6) : "";
+const filSlotName = t => t.ams < 0 ? "External" : ("AMS " + t.ams + " / " + (t.slot + 1));
+
+async function loadFilamentDb() {
+  try {
+    const d = await api("GET", "/api/filaments");
+    S.fildb = d.filaments || [];
+  } catch (e) { S.fildb = []; return; }
+  S.filById = {};
+  S.fildb.forEach(f => { S.filById[f.id] = f; });
+  const opts = S.fildb.map(f => '<option value="' + esc(f.id) + '">' + esc(f.name) + " (" + esc(f.id) + ")</option>").join("");
+  const man = $("#fil-manual");
+  man.innerHTML = '<option value="">Nothing - leave the targets alone</option>' + opts;
+  if (S.cfg && S.cfg.filament && !("filament.manualId" in S.dirty)) man.value = S.cfg.filament.manualId || "";
+  $("#fil-ov-id").innerHTML = '<option value="*">Every material</option>' + opts;
+  renderOverrideEditor();
+}
+
+/* The staged list wins over the saved one, so the editor shows what will be
+   written rather than what is currently on the device. */
+function filOverrides() {
+  const d = S.dirty["filament.overrides"];
+  const src = d || (S.cfg && S.cfg.filament && S.cfg.filament.overrides) || [];
+  return JSON.parse(JSON.stringify(src));
+}
+function renderOverrideEditor() {
+  const list = filOverrides();
+  const id = $("#fil-ov-id").value || "*";
+  const r = list.find(o => o.id === id) || {};
+  const set = (sel, v) => { $(sel).value = (v == null ? "" : v); };
+  set("#fil-ov-ct", r.chamberTarget); set("#fil-ov-cd", r.cooldownTarget);
+  set("#fil-ov-vf", r.ventFloor);
+  $("#fil-ov-pc").value = r.postPrintCooling || "";
+  $("#filOvCount").textContent = list.length ? "(" + list.length + " of 12 used)" : "(none)";
+  const name = i => i === "*" ? "Every material" : ((S.filById && S.filById[i] ? S.filById[i].name : i));
+  const cell = v => v == null ? "&ndash;" : v;
+  $("#filOvRows").innerHTML = list.length ? list.map(o =>
+    "<tr><td>" + esc(name(o.id)) + "</td><td>" + cell(o.chamberTarget) + "</td><td>" + cell(o.cooldownTarget) +
+    "</td><td>" + cell(o.ventFloor) + "</td><td>" + esc(o.postPrintCooling || "–") +
+    '</td><td><button class="btn sm" type="button" data-ovdel="' + esc(o.id) + '" data-tip="Delete this rule.">Remove</button></td></tr>').join("")
+    : '<tr><td colspan="6" class="hint" style="padding:8px 0">No overrides - every material follows the guide.</td></tr>';
+}
+function applyOverrideRule(remove) {
+  const id = $("#fil-ov-id").value || "*";
+  const n = sel => { const v = $(sel).value; return v === "" ? null : clamp(+v, 0, 100); };
+  let list = filOverrides().filter(o => o.id !== id);
+  if (!remove) {
+    const rule = {
+      id: id,
+      chamberTarget: $("#fil-ov-ct").value === "" ? null : clamp(+$("#fil-ov-ct").value, 20, 80),
+      cooldownTarget: $("#fil-ov-cd").value === "" ? null : clamp(+$("#fil-ov-cd").value, 15, 60),
+      ventFloor: n("#fil-ov-vf"),
+      postPrintCooling: $("#fil-ov-pc").value || null
+    };
+    const empty = rule.chamberTarget == null && rule.cooldownTarget == null &&
+      rule.ventFloor == null && !rule.postPrintCooling;
+    if (empty) { toast("Nothing to override - fill in at least one field."); return; }
+    if (list.length >= 12) { toast("At most 12 material overrides.", "err"); return; }
+    list.push(rule);
+  }
+  markDirty("filament.overrides", list);
+  renderOverrideEditor();
+  toast(remove ? "Rule removed - save to apply" : "Rule staged - save to apply");
+}
+function wireFilament() {
+  $("#fil-ov-id").addEventListener("change", renderOverrideEditor);
+  $("#filOvSave").addEventListener("click", () => applyOverrideRule(false));
+  $("#filOvClear").addEventListener("click", () => applyOverrideRule(true));
+  $("#filOvRows").addEventListener("click", e => {
+    const b = e.target.closest("[data-ovdel]"); if (!b) return;
+    markDirty("filament.overrides", filOverrides().filter(o => o.id !== b.dataset.ovdel));
+    renderOverrideEditor();
+  });
+}
+
+function renderFilament(st) {
+  const fl = st.filament || {};
+  const tray = fl.tray, prof = fl.profile, eff = fl.effective || {};
+  const known = !!fl.id;
+  const label = fl.name || fl.family || (tray && tray.type) || "Unknown material";
+
+  /* --- header --- */
+  const b = $("#filBadge");
+  b.textContent = fl.source === "none" ? "no filament"
+    : fl.source === "manual" ? "set by you"
+      : fl.source === "external" ? "external spool" : "AMS";
+  b.className = "badge " + (fl.source === "none" ? "" : known ? "ok" : "warn");
+  const col = filColor(tray && tray.color);
+  $("#filSwatch").style.background = col || "";
+  $("#filName").textContent = label;
+  $("#filWhere").textContent = fl.source === "none"
+    ? "The printer is not reporting a loaded tray."
+    : (tray ? filSlotName(tray) + (tray.idx ? " · " + tray.idx : "") +
+      (tray.subBrand ? " · " + tray.subBrand : "") + (tray.type ? " · " + tray.type : "")
+      : "Chosen below, because the printer reports nothing about the spool.");
+
+  /* --- guide entry --- */
+  const extra = known && S.filById ? S.filById[fl.id] : null;
+  const link = $("#filLink");
+  if (known) {
+    link.href = "https://pwsh.github.io/filament-field-guide/#/filaments/" + encodeURIComponent(fl.id);
+    $("#filGuide").innerHTML = '<a href="' + esc(link.href) + '" target="_blank" rel="noopener">' +
+      esc(fl.name || fl.id) + "</a>" + (extra ? ' <span class="hint">' + esc(extra.cls) + "</span>" : "");
+  } else {
+    link.href = "https://pwsh.github.io/filament-field-guide/";
+    $("#filGuide").textContent = fl.source === "none" ? "-" : "no entry for this material";
+  }
+  const rec = prof && prof.chamberRec != null ? prof.chamberRec : null;
+  const max = prof && prof.chamberMax != null ? prof.chamberMax : null;
+  $("#filChamber").textContent = rec == null && max == null ? "-"
+    : (rec == null ? "up to " + max : rec + " °C") + (max != null && rec != null ? " (up to " + max + " °C)" : "");
+  $("#filCool").textContent = prof && prof.partCoolRec != null ? prof.partCoolRec + " %" : "-";
+  $("#filVent").textContent = prof ? (VENT_TEXT[prof.vent] || prof.vent) : "-";
+  $("#filEnc").textContent = !prof ? "-" : [
+    prof.openForCooling ? "open for cooling" : "closed",
+    prof.heatedRequired ? "heated chamber required" : null,
+    extra && (extra.flags & 1) ? "enclosure recommended" : null,
+    extra && (extra.flags & 8) ? "hardened nozzle" : null
+  ].filter(Boolean).join(", ");
+
+  $("#filEmit").textContent = extra ? "VOC " + extra.voc + ", particulates " + extra.part : "-";
+
+  /* --- effective targets --- */
+  $("#filEffChamber").textContent = eff.chamberTarget == null ? "--" : eff.chamberTarget;
+  $("#filEffCooldown").textContent = eff.cooldownTarget == null ? "--" : eff.cooldownTarget;
+  $("#filEffVent").textContent = eff.ventFloor == null ? "--" : eff.ventFloor;
+  $("#filEffCooling").textContent = eff.postPrintCooling === "gentle" ? "Gentle" : "Fast";
+  $("#filCard").style.opacity = fl.auto === false ? ".72" : "";
+
+  /* --- the override editor follows the loaded material until you pick one --- */
+  const sel = $("#fil-ov-id");
+  if (known && !sel.dataset.touched && sel.value !== fl.id && S.filById && S.filById[fl.id]) {
+    sel.value = fl.id;
+    renderOverrideEditor();
+  }
+
+  /* --- all trays --- */
+  const trays = fl.trays || [];
+  $("#filTrayCount").textContent = trays.length ? "(" + trays.length + ")" : "(none reported)";
+  $("#filTrayRows").innerHTML = trays.length ? trays.map(t => {
+    const c = filColor(t.color);
+    const active = tray && t.ams === tray.ams && t.slot === tray.slot;
+    return "<tr" + (active ? ' class="sel"' : "") + "><td>" + esc(filSlotName(t)) + "</td><td>" +
+      '<span class="fdot" style="background:' + (c || "transparent") + '"></span>' +
+      esc(t.type || "empty") + "</td><td class=\"mono\">" + esc(t.idx || "-") + "</td><td>" +
+      (t.id ? '<a href="https://pwsh.github.io/filament-field-guide/#/filaments/' + esc(t.id) +
+        '" target="_blank" rel="noopener">' + esc(t.id) + "</a>" : "-") + "</td></tr>";
+  }).join("") : '<tr><td colspan="4" class="hint" style="padding:8px 0">The printer has not described any tray yet.</td></tr>';
+
+  /* --- dashboard chip + job row --- */
+  const chip = $("#filChip");
+  chip.hidden = fl.source === "none" && !known;
+  if (!chip.hidden) {
+    chip.innerHTML = '<span class="fdot" style="background:' + (col || "transparent") + '"></span>' + esc(label);
+    chip.className = "badge " + (known ? "" : "warn");
+    chip.setAttribute("data-tip", (tray ? "In " + filSlotName(tray).toLowerCase() : "Set by you on the Fan curve page") +
+      (known ? ". Chamber target " + eff.chamberTarget + " °C, vent floor " + eff.ventFloor +
+        " %, " + (eff.postPrintCooling === "gentle" ? "gentle" : "fast") + " cool-down." +
+        (fl.auto === false ? " Filament-aware cooling is switched off, so these are the plain thermostat numbers." : "")
+        : ". The Filament Field Guide has no entry for this material, so the plain thermostat numbers are used."));
+  }
+  $("#jobFil").textContent = fl.source === "none" ? "none reported"
+    : label + (tray ? " (" + filSlotName(tray) + ")" : "");
 }
 
 /* --------------------------- curve ----------------------------- */
@@ -1610,7 +1865,7 @@ setInterval(() => {
 
 /* ----------------------------- init ---------------------------- */
 async function init() {
-  buildNav(); wireControls(); wirePages(); renderApiTable();
+  buildNav(); wireControls(); wirePages(); wireFilament(); renderApiTable();
   new ResizeObserver(sizeCanvas).observe(cv.parentElement);
   try {
     const [cfg, st] = await Promise.all([api("GET", "/api/config"), api("GET", "/api/status")]);
@@ -1624,6 +1879,9 @@ async function init() {
     fail(e); connBanner(true); go("dashboard"); sizeCanvas();
   }
   try { const l = await api("GET", "/api/log"); (l.lines || []).forEach(addLog); } catch (e) { }
+  // The guide table never changes at runtime, so one fetch is enough; the card
+  // renders without it and fills in the extra properties once it lands.
+  loadFilamentDb();
   loadInfo(); startLive();
 }
 init();

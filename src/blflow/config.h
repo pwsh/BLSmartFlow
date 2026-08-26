@@ -15,6 +15,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include "curve.h"
+#include "filament_match.h"
 
 namespace blsf {
 
@@ -69,6 +70,22 @@ struct FanConfig {
     uint8_t  ambientTemp;       // degC assumed room temperature for the cooling estimate
 };
 
+// Filament-aware cooling (REWORK-SPEC 16.3). `overrides` is a small fixed array
+// rather than a list: twelve materials is more than anyone tunes by hand, and a
+// fixed array keeps Config a POD that can be memcpy'd and validated in place.
+//
+// FilamentOverrideRule comes from filament_match.h so the pure profile resolver
+// can be handed the config array directly, with no conversion step to get wrong.
+static const uint8_t FILAMENT_MAX_OVERRIDES = 12;
+
+struct FilamentConfig {
+    bool     autoDetect;         // JSON "auto" - `auto` is a keyword in C++
+    char     manualId[24];       // guide id forced when the printer reports no tray
+    uint8_t  ventFloor[3];       // % minimum output by vent demand: optional/recommended/required
+    uint8_t  overrideCount;
+    FilamentOverrideRule overrides[FILAMENT_MAX_OVERRIDES];
+};
+
 // Learned Newtonian cooling constants (REWORK-SPEC 15.4), in 1/min, indexed by
 // fan-output bucket (0/25/50/75/100 %). NaN = never measured. Persisted so a
 // power cut does not throw away hours of passive observation.
@@ -115,6 +132,7 @@ struct Config {
     DebugConfig   debug;
     SsdpConfig    ssdp;
     ThermalConfig thermal;
+    FilamentConfig filament;
 };
 
 // The single live instance. Written from the loop task, the AsyncTCP task (every

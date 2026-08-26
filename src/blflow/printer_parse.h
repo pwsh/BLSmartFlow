@@ -19,6 +19,10 @@
 //   * `home_flag` arrives as a negative int32 and must be read as uint32 before
 //     the door bit (23) is tested. It is the front-door plunger switch; the top
 //     lid has no sensor at all.
+//   * The AMS block is *incremental* on P1/A1 firmware: a report may carry one
+//     tray and nothing else. Trays are therefore merged by (ams id, slot id) and
+//     never cleared because a report did not mention them - only an explicit
+//     empty `tray_type` means "this slot is empty now".
 //   * On some X1C units the closed door does not actuate that switch, so the bit
 //     sits at "open" forever (pressing the switch by hand flips it). A raw bit is
 //     therefore not evidence of anything until it has been seen to *change*:
@@ -35,11 +39,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+// For the active-tray encodings (tray_now / H2D snow). filament_match.h is pure
+// and pulls in nothing but the generated table declarations.
+#include "filament_match.h"
+
 namespace blsf {
 
 // Sentinels for "the printer has not told us yet".
 static const float REPORT_TEMP_UNKNOWN = NAN;
 static const int8_t REPORT_FAN_UNKNOWN = -1;
+
+// One AMS slot (or the external spool holder) as the printer describes it.
+// Fixed-size and POD like everything else in the report: the whole struct is
+// memcpy'd under a spinlock.
+//   type  - `tray_type`, the printer's own classification ("PLA", "PLA-CF", "")
+//   sub   - `tray_sub_brands`, the product name ("PLA Basic")
+//   idx   - `tray_info_idx`, the Bambu filament id ("GFA00")
+//   color - `tray_color`, 8 hex digits RGBA ("161616FF")
+// An empty `type` means the slot is empty, which is exactly how the printer
+// reports an unloaded tray.
+struct TrayReport {
+    char type[16];
+    char sub[24];
+    char idx[8];
+    char color[9];
+};
+
+// Four AMS units of four slots is the largest configuration the firmware tracks
+// (16 slots); an AMS-HT counts as a unit with one slot. Unit ids are stored
+// alongside the trays rather than used as an index, because AMS-HT units report
+// ids >= 128.
+static const uint8_t REPORT_MAX_AMS = 4;
+static const uint8_t REPORT_MAX_SLOTS = 4;
+static const uint8_t REPORT_MAX_EXTRUDERS = 2;
+static const uint16_t REPORT_SNOW_UNKNOWN = 0xFFFFu;
 
 // The subset of printer state we care about. POD by design: it is copied under a
 // spinlock on the device (see state.h) so it must contain no String or vector.
@@ -65,6 +98,17 @@ struct PrinterReport {
     float    chamber, chamberTarget;
 
     int8_t   fanPart, fanAux, fanChamber, fanHeatbreak;   // percent, -1 unknown
+
+    // --- filament / AMS (REWORK-SPEC 16) ---
+    // ~1 kB of the report, and the only part of it that is merged rather than
+    // replaced (see the field note about incremental AMS updates).
+    TrayReport trays[REPORT_MAX_AMS][REPORT_MAX_SLOTS];
+    int16_t    amsId[REPORT_MAX_AMS];      // reported unit id, -1 = slot unused
+    TrayReport external;                   // vt_tray, the external spool holder
+    bool       externalSeen;
+    int16_t    trayNow;                    // ams.tray_now, -1 = not reported
+    int16_t    extruderState;              // H2D device.extruder.state, -1 = none
+    uint16_t   extruderSnow[REPORT_MAX_EXTRUDERS];   // (ams << 8) | slot
 };
 
 // Print phase, derived from gcode_state + stg_cur + the temperature targets
@@ -110,6 +154,10 @@ inline void printerReportInit(PrinterReport& r)
     r.nozzle = r.nozzleTarget = r.bed = r.bedTarget = REPORT_TEMP_UNKNOWN;
     r.chamber = r.chamberTarget = REPORT_TEMP_UNKNOWN;
     r.fanPart = r.fanAux = r.fanChamber = r.fanHeatbreak = REPORT_FAN_UNKNOWN;
+    for (uint8_t i = 0; i < REPORT_MAX_AMS; i++) r.amsId[i] = -1;
+    r.trayNow = -1;
+    r.extruderState = -1;
+    for (uint8_t i = 0; i < REPORT_MAX_EXTRUDERS; i++) r.extruderSnow[i] = REPORT_SNOW_UNKNOWN;
 }
 
 // ha-bambulab CURRENT_STAGE_IDS, in the snake_case spelling the 2.0 API already
@@ -275,10 +323,39 @@ inline void buildPrinterFilter(JsonDocument& filter)
     // Only the four sub-objects we decode - not the whole `device` block, which
     // also carries camera, plate and nozzle-wear data we have no use for.
     JsonObject dev = p["device"].to<JsonObject>();
-    dev["extruder"] = true;
     dev["bed"] = true;
     dev["ctc"] = true;
     dev["airduct"] = true;
+    // The extruder block is spelled out rather than waved through: on an H2D it
+    // also carries per-nozzle wear, offsets and calibration data. `snow` is the
+    // loaded slot as (ams << 8) | slot and `state` has the active extruder in
+    // bits 4..7 (REWORK-SPEC 16.2 step 5).
+    JsonObject ext = dev["extruder"].to<JsonObject>();
+    ext["state"] = true;
+    JsonObject extInfo = ext["info"][0].to<JsonObject>();
+    extInfo["id"] = true;
+    extInfo["temp"] = true;
+    extInfo["snow"] = true;
+
+    // AMS. A filter array applies its first element to every array element, so
+    // one tray filter covers all four slots of all four units.
+    JsonObject ams = p["ams"].to<JsonObject>();
+    ams["tray_now"] = true;
+    JsonObject unit = ams["ams"][0].to<JsonObject>();
+    unit["id"] = true;
+    JsonObject tray = unit["tray"][0].to<JsonObject>();
+    tray["id"] = true;
+    tray["tray_type"] = true;
+    tray["tray_sub_brands"] = true;
+    tray["tray_info_idx"] = true;
+    tray["tray_color"] = true;
+    // The external spool holder is a tray-shaped object of its own.
+    JsonObject vt = p["vt_tray"].to<JsonObject>();
+    vt["id"] = true;
+    vt["tray_type"] = true;
+    vt["tray_sub_brands"] = true;
+    vt["tray_info_idx"] = true;
+    vt["tray_color"] = true;
 }
 
 namespace detail {
@@ -295,6 +372,39 @@ inline int8_t gearToPercent(JsonVariantConst v)
     return (int8_t)((gear * 100 + 7) / 15);   // round to nearest
 }
 
+// Bambu writes small integers as decimal strings about as often as numbers
+// ("id": "0" in one firmware, 0 in the next), so every id goes through this.
+inline int intFrom(JsonVariantConst v, int fallback)
+{
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        if (!s || !*s) return fallback;
+        char* end = nullptr;
+        const long n = strtol(s, &end, 10);
+        if (end == s) return fallback;
+        return (int)n;
+    }
+    if (v.is<float>()) return (int)v.as<double>();
+    return fallback;
+}
+
+// Copies one tray field, but only when the report actually carries it: a P1
+// sends partial `ams` objects and an absent key means "unchanged", not "empty".
+inline void mergeTrayStr(JsonObjectConst o, const char* key, char* dst, size_t dstSize)
+{
+    JsonVariantConst v = o[key];
+    if (!v.is<const char*>()) return;
+    copyStr(dst, dstSize, v.as<const char*>());
+}
+
+inline void mergeTray(JsonObjectConst o, TrayReport& t)
+{
+    mergeTrayStr(o, "tray_type", t.type, sizeof(t.type));
+    mergeTrayStr(o, "tray_sub_brands", t.sub, sizeof(t.sub));
+    mergeTrayStr(o, "tray_info_idx", t.idx, sizeof(t.idx));
+    mergeTrayStr(o, "tray_color", t.color, sizeof(t.color));
+}
+
 inline bool packedFrom(JsonVariantConst v, uint32_t& out)
 {
     if (!v.is<float>()) return false;
@@ -305,6 +415,38 @@ inline bool packedFrom(JsonVariantConst v, uint32_t& out)
 }
 
 }  // namespace detail
+
+// --- AMS lookup ------------------------------------------------------------
+// Unit ids are stored, not used as an index, because an AMS-HT reports an id of
+// 128 or more. `create` claims a free row for a unit seen for the first time.
+inline int reportAmsIndex(PrinterReport& r, int amsId, bool create)
+{
+    for (uint8_t i = 0; i < REPORT_MAX_AMS; i++) if (r.amsId[i] == amsId) return i;
+    if (!create) return -1;
+    for (uint8_t i = 0; i < REPORT_MAX_AMS; i++) {
+        if (r.amsId[i] < 0) { r.amsId[i] = (int16_t)amsId; return i; }
+    }
+    return -1;
+}
+
+inline int reportAmsIndex(const PrinterReport& r, int amsId)
+{
+    for (uint8_t i = 0; i < REPORT_MAX_AMS; i++) if (r.amsId[i] == amsId) return i;
+    return -1;
+}
+
+// The tray at (ams unit id, slot), or the external holder for ams < 0.
+// Null when that slot has never been reported.
+inline const TrayReport* reportTray(const PrinterReport& r, int amsId, int slot)
+{
+    if (amsId < 0) return r.externalSeen ? &r.external : nullptr;
+    const int i = reportAmsIndex(r, amsId);
+    if (i < 0 || slot < 0 || slot >= REPORT_MAX_SLOTS) return nullptr;
+    return &r.trays[i][slot];
+}
+
+// A slot holds filament exactly when the printer put a type on it.
+inline bool trayLoaded(const TrayReport& t) { return t.type[0] != '\0' || t.idx[0] != '\0'; }
 
 // Patches `out` with whatever `root` (a full report document, i.e. the object
 // containing "print") carries. Returns false when the message is an ack, is
@@ -420,6 +562,53 @@ inline bool parsePrinterReport(JsonVariantConst root, PrinterReport& out, uint32
         }
     }
 
+    // --- AMS trays (REWORK-SPEC 16) -----------------------------------------
+    // Everything here MERGES. The X1 repeats the whole `ams` block every second,
+    // but a P1 sends only what changed - often a single tray - and clearing the
+    // other fifteen slots because this report did not mention them would make
+    // the filament flicker in and out of existence.
+    JsonVariantConst amsv = p["ams"];
+    if (amsv.is<JsonObjectConst>()) {
+        JsonObjectConst amso = amsv.as<JsonObjectConst>();
+        if (!amso["tray_now"].isNull()) {
+            const int now = detail::intFrom(amso["tray_now"], -1);
+            if (now >= 0 && now <= 255) out.trayNow = (int16_t)now;
+        }
+        JsonArrayConst units = amso["ams"];
+        for (JsonObjectConst unit : units) {
+            const int id = detail::intFrom(unit["id"], -1);
+            if (id < 0) continue;
+            const int slotIdx = reportAmsIndex(out, id, /*create=*/true);
+            if (slotIdx < 0) continue;                 // more than four units
+            for (JsonObjectConst tr : unit["tray"].as<JsonArrayConst>()) {
+                const int slot = detail::intFrom(tr["id"], -1);
+                if (slot < 0 || slot >= REPORT_MAX_SLOTS) continue;
+                detail::mergeTray(tr, out.trays[slotIdx][slot]);
+            }
+        }
+    }
+    JsonVariantConst vt = p["vt_tray"];
+    if (vt.is<JsonObjectConst>()) {
+        detail::mergeTray(vt.as<JsonObjectConst>(), out.external);
+        out.externalSeen = true;
+    }
+    // H2D: which extruder is active, and what each one has loaded.
+    if (dev.is<JsonObjectConst>()) {
+        JsonVariantConst ext = dev["extruder"];
+        if (ext["state"].is<float>()) out.extruderState = (int16_t)ext["state"].as<double>();
+        JsonArrayConst infos = ext["info"];
+        uint8_t fallbackId = 0;
+        for (JsonObjectConst e : infos) {
+            const int id = detail::intFrom(e["id"], fallbackId);
+            fallbackId++;
+            if (id < 0 || id >= REPORT_MAX_EXTRUDERS) continue;
+            if (!e["snow"].isNull()) {
+                const int snow = detail::intFrom(e["snow"], -1);
+                if (snow >= 0 && snow <= 0xFFFF) out.extruderSnow[id] = (uint16_t)snow;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -474,6 +663,19 @@ inline const char* phaseName(Phase p)
 // that the switch works, "closed" is the only safe reading: a printer whose bit
 // is stuck at 1 would otherwise sit under the door rule for every print.
 inline bool reportDoorOpen(const PrinterReport& r) { return r.doorKnown && r.doorOpen; }
+
+// Which tray the printer is feeding from (REWORK-SPEC 16.2 step 5). The H2D
+// answer wins when the printer has given us one, because on a two-extruder
+// machine `tray_now` cannot express "the other tool head is loaded too".
+inline ActiveTray reportActiveTray(const PrinterReport& r)
+{
+    if (r.extruderState >= 0) {
+        const ActiveTray h2d = filamentActiveTrayH2D(r.extruderState, r.extruderSnow,
+                                                     REPORT_MAX_EXTRUDERS);
+        if (h2d.source != TraySource::None) return h2d;
+    }
+    return filamentActiveTray(r.trayNow);
+}
 
 inline bool phaseIsPrinting(Phase p)
 {

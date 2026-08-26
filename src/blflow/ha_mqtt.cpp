@@ -111,6 +111,24 @@ String nullableTemplate(const char* path)
     return String("{% set v = ") + path + " %}{{ 'unknown' if v is none else v }}";
 }
 
+// A sensor whose extra attributes come from the same retained `state` document.
+// Home Assistant needs a separate attributes topic even when it is the same
+// topic, hence json_attributes_topic + json_attributes_template.
+void discoverSensorWithAttrs(const char* objectId, const char* name, const char* valueTemplate,
+                             const char* attrTemplate, const char* icon, bool remove)
+{
+    JsonDocument doc;
+    if (!remove) {
+        doc["name"] = name;
+        doc["state_topic"] = topic("state");
+        doc["value_template"] = valueTemplate;
+        doc["json_attributes_topic"] = topic("state");
+        doc["json_attributes_template"] = attrTemplate;
+        if (icon) doc["icon"] = icon;
+    }
+    publishDiscovery("sensor", objectId, doc, remove);
+}
+
 // A sensor that reads one field out of the retained `state` document.
 void discoverSensor(const char* objectId, const char* name, const char* valueTemplate,
                     const char* unit, const char* deviceClass, const char* stateClass,
@@ -236,6 +254,28 @@ void publishDiscoveryAll(bool remove)
                    "{{ value_json.fan.chamberTarget }}", 20, 80, "mdi:home-thermometer", remove);
     discoverNumber("cooldown_target", "Cool-down target", "cooldown_target/set",
                    "{{ value_json.fan.cooldownTarget }}", 15, 60, "mdi:snowflake-thermometer", remove);
+
+    // Filament (REWORK-SPEC 16.4). The state is the guide's display name, which is
+    // "unknown" until the printer has told us what is in the active tray.
+    const String filamentT = nullableTemplate("value_json.filament.name");
+    const String filamentChamberT = nullableTemplate("value_json.filament.effective.chamberTarget");
+    // Attributes are built explicitly rather than dumping the whole block: an
+    // attribute set that changes shape between updates is what makes an HA
+    // history graph unusable.
+    static const char kFilamentAttrs[] =
+        "{{ {'type': value_json.filament.tray.type if value_json.filament.tray else none,"
+        " 'idx': value_json.filament.tray.idx if value_json.filament.tray else none,"
+        " 'id': value_json.filament.id,"
+        " 'family': value_json.filament.family,"
+        " 'source': value_json.filament.source,"
+        " 'vent': value_json.filament.profile.vent if value_json.filament.profile else none,"
+        " 'chamberTarget': value_json.filament.effective.chamberTarget,"
+        " 'ventFloor': value_json.filament.effective.ventFloor,"
+        " 'postPrintCooling': value_json.filament.effective.postPrintCooling} | tojson }}";
+    discoverSensorWithAttrs("filament", "Filament", filamentT.c_str(), kFilamentAttrs,
+                            "mdi:printer-3d-nozzle", remove);
+    discoverSensor("filament_chamber_target", "Filament chamber target", filamentChamberT.c_str(),
+                   "\u00b0C", "temperature", nullptr, "mdi:home-thermometer", remove);
 
     discoverBinary("printer_online", "Printer online", "{{ 'ON' if value_json.printer.online else 'OFF' }}", "connectivity", remove);
     // doorOpen is null until the printer has proved its door switch reports.

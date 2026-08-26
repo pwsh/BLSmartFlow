@@ -8,6 +8,7 @@ are 390 px wide phone renders.
 |---|---|
 | `ui-dashboard.png` | Dashboard: fan gauge, manual override, temperatures, print job, connections |
 | `ui-curve.png` | Fan curve page: canvas editor, presets, point table |
+| `ui-filament.png` | The Filament card on the Fan curve page, with every section expanded |
 | `ui-printer.png` | Printer page: connection form and the live status card |
 | `ui-network.png` | Network page as seen from the LAN |
 | `ui-setup-ap.png` | Network page in setup mode, with the access-point banner |
@@ -18,4 +19,5 @@ are 390 px wide phone renders.
 | `smartflow_shell.png`, `smartflow_blades.png` | Renders of the fan module hardware |
 
 To retake a screenshot, run `python3 tools/mock_server.py` (add `--ap` for the setup-mode shot) and
-capture the page at the same width.
+capture the page at the same width. `ui-filament.png` is a clip of `#filCard` with its `<details>`
+sections forced open; `POST /mock/tray {"now":"0"}` selects which tray it shows.

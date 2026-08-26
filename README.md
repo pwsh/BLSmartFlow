@@ -19,6 +19,9 @@ in LAN Only Mode.
   nozzle, bed, chamber or the hottest of the three.
 - **Control behaviour** – hysteresis, ramp rate, minimum running speed, kick-start pulse, 25 kHz PWM
   (configurable), inverted outputs, per-output enable.
+- **Filament-aware cooling** – reads the loaded filament from the AMS or the external spool and picks
+  the chamber target, the post-print cool-down style and a ventilation floor to match it, from an
+  embedded copy of the Filament Field Guide. Per-material overrides, or switch it off entirely.
 - **Safety** – stale-data failsafe (off / hold / fixed speed when the printer stops reporting),
   optional "only while printing" with a post-print cooldown, manual override with automatic expiry.
 - **Dashboard** – live temperatures, print progress, printer fans, connection state and fan output,
@@ -94,11 +97,13 @@ src/blflow/config.*          persisted configuration (LittleFS /config.json), va
 src/blflow/curve.h           pure fan-curve math (unit-tested on the host)
 src/blflow/fan_control.*     PWM outputs and the control state machine
 src/blflow/printer_link.*    Bambu MQTT client (FreeRTOS task)  ·  printer_parse.h: report parser
+src/blflow/filament.*        loaded-filament matching  ·  filament_match.h + generated filament_db.h
 src/blflow/ha_mqtt.*         external MQTT broker + Home Assistant discovery
 src/blflow/web_server.*      REST API, SSE, OTA, captive portal  ·  status.*: the status object
 src/blflow/wifi_manager.*    STA/AP state machine, scan, mDNS
 src/www/index.html           the web UI
 tools/mock_server.py         API simulator for UI development
+tools/gen_filament_db.py     regenerates src/blflow/filament_db.h from the Filament Field Guide
 test/                        Unity tests + real X1C MQTT fixtures
 docs/                        guides, spec, code review, WebSerial provisioning page, images
 ```
@@ -113,3 +118,6 @@ Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-N
 - **[xps3riments](https://github.com/xps3riments)** – inspiration for the foundation of the code
 - **[longrackslabs](https://github.com/longrackslabs)** – build process, documentation, community support
 - **sschwetz** – chamber-temperature source and dependency fixes (upstream PRs #4 / #5)
+- **[Filament Field Guide](https://github.com/pwsh/filament-field-guide)** – the per-material data
+  behind filament-aware cooling (`src/blflow/filament_db.h`), used under
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)

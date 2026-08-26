@@ -4,7 +4,8 @@ BLSmartFlow is a small ESP32 board that drives one or two fans from your Bambu L
 temperatures. It reads the printer over the printer's own local MQTT link, looks the temperature up
 in a curve you draw in your browser, and sets the fan speed. It can also work the other way round —
 hold the enclosure at a temperature you pick and adjust the fan until it gets there — and it knows
-to leave the fan alone while the printer is warming up or the door is open. Everything is configured
+to leave the fan alone while the printer is warming up or the door is open. It also reads which
+filament is loaded and picks the right temperatures for it on its own. Everything is configured
 from a web page on the device itself — no app, no cloud account.
 
 This guide assumes you have never flashed an ESP32 before. Follow it top to bottom.
@@ -18,13 +19,14 @@ This guide assumes you have never flashed an ESP32 before. Follow it top to bott
 | [5. Shaping the fan curve](#5-shaping-the-fan-curve) | points, presets, source, behaviour, safety |
 | [6. Door and print phases](#6-door-and-print-phases) | rules that watch what the printer is *doing* |
 | [7. Chamber thermostat mode](#7-chamber-thermostat-mode) | hold the enclosure at a temperature |
-| [8. Manual override](#8-manual-override) | take control from the dashboard |
-| [9. Home Assistant in five minutes](#9-home-assistant-in-five-minutes) | broker, discovery, entities |
-| [10. Updating the firmware](#10-updating-the-firmware) | OTA from the System page |
-| [11. Backup, restore, restart, factory reset, login](#11-backup-restore-restart-factory-reset-login) | maintenance |
-| [12. The status LED](#12-the-status-led) | what the blinks mean |
-| [13. Troubleshooting](#13-troubleshooting) | symptom → cause → fix |
-| [14. Serial provisioning (the fallback)](#14-serial-provisioning-the-fallback) | when the browser route fails |
+| [8. Filament-aware cooling](#8-filament-aware-cooling) | let the loaded material pick the targets |
+| [9. Manual override](#9-manual-override) | take control from the dashboard |
+| [10. Home Assistant in five minutes](#10-home-assistant-in-five-minutes) | broker, discovery, entities |
+| [11. Updating the firmware](#11-updating-the-firmware) | OTA from the System page |
+| [12. Backup, restore, restart, factory reset, login](#12-backup-restore-restart-factory-reset-login) | maintenance |
+| [13. The status LED](#13-the-status-led) | what the blinks mean |
+| [14. Troubleshooting](#14-troubleshooting) | symptom → cause → fix |
+| [15. Serial provisioning (the fallback)](#15-serial-provisioning-the-fallback) | when the browser route fails |
 
 ---
 
@@ -455,7 +457,112 @@ every `k` in the table.
 
 ---
 
-## 8. Manual override
+## 8. Filament-aware cooling
+
+The right chamber temperature is not a property of your printer. It is a property of the plastic in
+it. PLA wants the enclosure as cool as it can get; ABS wants it at 50 °C; ASA wants a little warmer
+still. Setting one number and leaving it there means being wrong for most of what you print.
+
+Your printer already knows what is loaded — the AMS reads it off the spool's tag, and Bambu filament
+carries a material code. BLSmartFlow reads that, looks the material up in a table baked into the
+firmware, and moves its own targets to suit. It is on by default and needs no setup.
+
+![The Filament card on the Fan curve page](img/ui-filament.png)
+
+### What is detected
+
+Open the **Fan curve** page and look at the **Filament** card.
+
+* **The active tray** — colour, material, the Bambu id (`GFB00`) and which AMS slot it came from.
+  A spool on the external holder shows as *External*. A multi-material print moves the card as the
+  printer swaps trays, and the targets move with it.
+* **The matched entry** in the [Filament Field Guide](https://pwsh.github.io/filament-field-guide/):
+  the ambient temperature band, the recommended part-cooling setting, how badly the fumes want
+  ventilating and what it gives off. The name is a link straight to the guide's page for that
+  material if you want the long version.
+* **All trays** — the whole AMS, at the bottom of the card, so you can see what the printer thinks is
+  loaded everywhere.
+
+Carbon- and glass-filled grades fall back to the plain polymer when the guide has no separate entry:
+`PA-GF` is shown as PA-GF but cooled like PA. Support filaments take the profile of the material they
+are printed *next to* — Support For PLA is cooled like PLA. If the guide has never heard of your
+material the card says so and nothing changes; your own settings stand.
+
+### What changes
+
+Four numbers, shown in the middle of the card:
+
+| | What it means |
+|---|---|
+| **Chamber target** | The temperature *Chamber thermostat* mode holds while printing. PLA 30 °C, PETG 35 °C, ABS 50 °C, ASA 55 °C, PC 55 °C. For the materials that want cooling this is a ceiling — "do not let it get warmer than this" — not a temperature to reach. |
+| **Cool down to** | Where the chamber is emptied down to after the print. Unchanged from your setting unless you override it. |
+| **Vent floor** | A minimum fan speed while a print is running. See the caveat below. |
+| **After the print** | *Fast* runs the cool-down normally. *Gentle* is used for materials the guide prints with the part fan off: the fan stays off until the chamber is 10 °C below the print target and then runs at half speed at most. Blasting cold air at a hot ABS part is how it splits. |
+
+These feed the chamber thermostat and the cool-down window. In plain **Curve** mode the curve still
+decides the speed — the filament only ends the cool-down at the right temperature and holds the vent
+floor.
+
+To switch the whole thing off, turn off **Use the loaded filament**. The card still shows what is
+loaded; the fan goes back to the numbers in the *Chamber thermostat* card, whatever is in the AMS.
+
+### When the printer reports nothing
+
+An external spool with no tag, or a P1 with no AMS, tells the device nothing. Pick your usual
+material under **Material when the printer reports none** and it is used whenever there is nothing
+better. A tray the printer *does* report always wins over it.
+
+### Overriding a material
+
+Guides are opinions. If your ABS wants 48 °C in your room with your fan, say so.
+
+Open **Override for this material**, check that *Applies to* names the right material, fill in only
+the fields you want to change, and press **Apply rule**. The rule is staged like every other setting
+— press **Save changes** at the bottom of the page to write it to the device. Leave a field empty and
+the guide's own figure is used.
+
+*Applies to* also offers **Every material**, a catch-all rule for things like "never cool below
+30 °C". A material's own rule always beats the catch-all. You can keep twelve rules; the table under
+the editor lists them with a Remove button each.
+
+### The ventilation floor, and why it is nearly zero
+
+ABS and ASA give off styrene and a great many ultrafine particles. The guide marks them
+*ventilation required*, and the honest answer to that is an exhaust that goes through a filter or out
+of the room.
+
+But **Bambu deliberately keeps the exhaust fan off** while printing those materials, and they are
+right to: the chamber heat is what stops ABS warping and splitting, and an exhaust fan throws it
+away. That is the tension this setting sits in.
+
+So the defaults are 0 % for everything except *ventilation required*, which gets **10 %** — a trickle
+that keeps the air moving without emptying the chamber. Change it only if you know where your air is
+going:
+
+* Fan ducted outside or through a carbon filter → raising *required* to 20–30 % is reasonable.
+* Fan just stirring the air in the room → leave it low. It is not cleaning anything, and it is
+  costing you chamber temperature.
+* Only ever printing PLA and PETG → all three can stay at 0.
+
+The floor applies **only while a print is running**, and it never overrides the door rule, the
+preheat rule or the stale-data failsafe. Those exist to stop the fan for a reason.
+
+### On the dashboard
+
+The **Print job** card gets a chip with the material's colour and name next to the phase chip, and a
+*Filament* row naming the slot it came from. Hovering the chip shows the effective targets.
+
+### Where the data comes from
+
+The material table is the [Filament Field Guide](https://github.com/pwsh/filament-field-guide) by
+pwsh, used under the **Creative Commons Attribution 4.0** licence (CC BY 4.0). It ships inside the
+firmware — 90 materials, about 8 KB — so nothing is fetched from the internet and the card works in
+setup mode with no network at all. Every place the UI shows one of its numbers carries the credit and
+a link back.
+
+---
+
+## 9. Manual override
 
 The **Manual override** card on the dashboard takes the fan away from the curve.
 
@@ -481,7 +588,7 @@ On a phone the same controls sit in a single column with the navigation as a bot
 
 ---
 
-## 9. Home Assistant in five minutes
+## 10. Home Assistant in five minutes
 
 The device can talk to your own MQTT broker (the Mosquitto add-on, for example) and announce itself
 to Home Assistant automatically. This is completely separate from the printer link.
@@ -513,6 +620,8 @@ What you get:
 | Printer state, Printer stage | `sensor` | e.g. `RUNNING`, `heatbed_preheating`. |
 | Print phase | `sensor` | `preheat`, `printing`, `paused`, `cooling`, `finished`, `idle`, … — the phase the fan rules act on. Handy as an automation trigger. |
 | Cooling rate | `sensor` | How fast the chamber is changing, in °C/min (negative while cooling). *Unknown* when nothing is being measured. |
+| Filament | `sensor` | The material in the active tray. Its attributes carry the Bambu id, the guide id, the ventilation demand and the effective targets — useful for an automation that only runs your air filter for ABS. |
+| Filament chamber target | `sensor` | The chamber temperature the loaded material asks for, in °C. |
 | Print progress, Remaining time | `sensor` | % and minutes. |
 | Printer WiFi, Device RSSI, Uptime | `sensor` | Diagnostics. |
 | Printer online, Door, Printing | `binary_sensor` | Connectivity, front door open, print running. *Door* shows **Unknown** on printers that never report a door change. |
@@ -529,7 +638,7 @@ You do not need Home Assistant to use MQTT: the same status document is publishe
 
 ---
 
-## 10. Updating the firmware
+## 11. Updating the firmware
 
 ![The System page with device info, firmware update, backup, web access and maintenance cards](img/ui-system.png)
 
@@ -546,7 +655,7 @@ You do not need Home Assistant to use MQTT: the same status document is publishe
 
 ---
 
-## 11. Backup, restore, restart, factory reset, login
+## 12. Backup, restore, restart, factory reset, login
 
 All of these live on the **System** page.
 
@@ -571,11 +680,11 @@ capitals to unlock the button. Everything goes: WiFi, printer details, curve, MQ
 > trusted LAN, nothing more. Requests that arrive over the **setup network** are never asked for a
 > password, so a device you can reach on its own hotspot is a way back in. If you forget the password
 > and the device is happily on your WiFi (so the setup network is not running), the way back is the
-> serial command `{"cmd":"factoryreset"}` over USB — see [section 12](#14-serial-provisioning-the-fallback).
+> serial command `{"cmd":"factoryreset"}` over USB — see [section 15](#15-serial-provisioning-the-fallback).
 
 ---
 
-## 12. The status LED
+## 13. The status LED
 
 The LED on GPIO 21 shows the most important problem first: WiFi beats the printer link, and the
 printer link beats stale data.
@@ -591,7 +700,7 @@ printer link beats stale data.
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -604,6 +713,10 @@ printer link beats stale data.
 | Chamber thermostat selected, but the chip says *Automatic* | The printer reports no chamber temperature, so the thermostat has nothing to control and falls back to the curve | Use Curve mode with the nozzle or bed as the source; only X1- and H2D-style machines have a chamber sensor |
 | The fan never runs during a print | *While preheating* is set to *Stop the fan* and the printer is still shown as **Preheating** — usually a bed or chamber that has not reached target | Wait, or check the phase chip on the dashboard. The bed must be within 3 °C of its target (the chamber within 2 °C) before the phase becomes *Printing* |
 | **Learned cooling rates** stays empty | Nothing has been measured yet: it needs a minute of steady fan output with the door still and **both heaters off**, which in practice means after a print | Let one print finish and idle for a few minutes. Check *Room temperature* on the Chamber thermostat card is roughly right |
+| The Filament card says the guide has no entry | The material is one the Filament Field Guide does not cover (EVA, for instance), or the spool is third-party with no readable type | Nothing breaks — your configured targets stand. Pick the closest material under *Material when the printer reports none*, or add an override |
+| The Filament card shows nothing at all | The printer is not reporting a tray: no AMS, or a spool on the external holder with no tag | Set *Material when the printer reports none* to what you actually print |
+| The fan will not go below 10 % during an ABS print | That is the ventilation floor for a *ventilation required* material | Set *Required* to 0 in the *Ventilation floor table* if your fan does not vent anywhere useful |
+| The chamber target ignores what I typed | *Use the loaded filament* is on and the material's own figure is being used instead | Add an override for that material, or turn *Use the loaded filament* off |
 | Was fine, now the open setup network is broadcasting | The WiFi has been unreachable for 90 s or more; the device raises the setup network while it keeps retrying | Fix the WiFi. Once the device rejoins, the setup network closes 5 minutes later on its own |
 | `http://blsmartflow.local/` does not load | mDNS is not resolved by every Windows and Android setup | Use the device's IP address from your router. The hostname is also on the Network page under *Current connection* |
 | "access code must be exactly 8 characters" | The LAN access code is 8 characters, always | Re-read it from the printer's *LAN Only Mode* screen |
@@ -615,11 +728,11 @@ printer link beats stale data.
 | The fan runs full speed when the UI says 0 % | The driver board is active-low | Turn **Invert PWM** on |
 | The fan stops as soon as a print finishes | *Only while printing* is on and the cooldown has elapsed | Raise **Cooldown**, or turn *Only while printing* off |
 | The dashboard stops updating in one tab | The device accepts at most 4 live event streams at once; extra tabs are refused | Close spare tabs. A refused tab falls back to polling every 2 seconds |
-| Forgotten UI password | Basic auth applies to everything on your LAN | Send `{"cmd":"factoryreset"}` over USB serial (section 12), or reach the device on the setup network, where no password is asked |
+| Forgotten UI password | Basic auth applies to everything on your LAN | Send `{"cmd":"factoryreset"}` over USB serial (section 15), or reach the device on the setup network, where no password is asked |
 
 ---
 
-## 14. Serial provisioning (the fallback)
+## 15. Serial provisioning (the fallback)
 
 If the browser route fails — no WiFi at all, a forgotten password, or a device you want to
 pre-configure on the bench — you can talk to the module over USB.

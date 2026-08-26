@@ -13,6 +13,7 @@
 #include "config.h"
 #include "curve.h"
 #include "fan_control.h"
+#include "filament.h"
 #include "log.h"
 #include "printer_link.h"
 #include "state.h"
@@ -159,6 +160,22 @@ void handleInfo(AsyncWebServerRequest* request)
     doc["partition"] = p ? p->label : "?";
     doc["resetReason"] = resetReasonText(esp_reset_reason());
     sendJson(request, doc);
+}
+
+// The embedded Filament Field Guide table (REWORK-SPEC 16.4). The UI fetches it
+// once to populate the manual-material list and to explain a matched entry; it
+// never changes at runtime, so it is served with a long cache lifetime keyed to
+// the firmware version.
+void handleFilaments(AsyncWebServerRequest* request)
+{
+    if (!authorised(request)) return;
+    JsonDocument doc;
+    filamentDbToJson(doc.to<JsonObject>());
+    String body;
+    serializeJson(doc, body);
+    AsyncWebServerResponse* r = request->beginResponse(200, "application/json", body);
+    r->addHeader("Cache-Control", "public, max-age=86400");
+    request->send(r);
 }
 
 void handleLog(AsyncWebServerRequest* request)
@@ -703,6 +720,7 @@ void webServerSetup()
     g_server.on("/api/status", HTTP_GET, handleStatus);
     g_server.on("/api/info", HTTP_GET, handleInfo);
     g_server.on("/api/log", HTTP_GET, handleLog);
+    g_server.on("/api/filaments", HTTP_GET, handleFilaments);
     g_server.on("/api/config", HTTP_GET, handleGetConfig);
     g_server.on("/api/curve", HTTP_GET, handleGetCurve);
     g_server.on("/api/wifi/scan", HTTP_GET, handleWifiScan);

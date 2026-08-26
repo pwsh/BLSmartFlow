@@ -16,16 +16,17 @@ full HTTP / MQTT / serial contracts.
 2. [Boot and main-loop sequence](#boot-and-main-loop-sequence)
 3. [Configuration schema](#configuration-schema)
 4. [Fan control state machine](#fan-control-state-machine)
-5. [Printer link](#printer-link)
-6. [REST API reference](#rest-api-reference)
-7. [MQTT / Home Assistant reference](#mqtt--home-assistant-reference)
-8. [Serial provisioning protocol](#serial-provisioning-protocol)
-9. [WiFi, AP and captive portal](#wifi-ap-and-captive-portal)
-10. [Security notes](#security-notes)
-11. [Building and testing](#building-and-testing)
-12. [Partitions and OTA](#partitions-and-ota)
-13. [Hardware](#hardware)
-14. [Known limitations](#known-limitations)
+5. [Filament-aware cooling](#filament-aware-cooling)
+6. [Printer link](#printer-link)
+7. [REST API reference](#rest-api-reference)
+8. [MQTT / Home Assistant reference](#mqtt--home-assistant-reference)
+9. [Serial provisioning protocol](#serial-provisioning-protocol)
+10. [WiFi, AP and captive portal](#wifi-ap-and-captive-portal)
+11. [Security notes](#security-notes)
+12. [Building and testing](#building-and-testing)
+13. [Partitions and OTA](#partitions-and-ota)
+14. [Hardware](#hardware)
+15. [Known limitations](#known-limitations)
 
 ---
 
@@ -43,6 +44,9 @@ full HTTP / MQTT / serial contracts.
 | `src/blflow/state.h/.cpp` | `PrinterState` / `FanState` snapshots under `portMUX` spinlocks; the PubSubClient state table |
 | `src/blflow/printer_parse.h` | Header-only, Arduino-free Bambu report parser (filter + field extraction), the full `stg_cur` name table and the pure `reportPhase()` |
 | `src/blflow/thermostat.h` | Header-only, Arduino-free PI step for the chamber thermostat (anti-windup + freeze flags) |
+| `src/blflow/filament_db.h` | **Generated** (`tools/gen_filament_db.py`): the Filament Field Guide as a PROGMEM `FilamentInfo[]` plus the Bambu `tray_info_idx` → type table |
+| `src/blflow/filament_match.h` | Header-only, Arduino-free: tray → guide-id matching, the `tray_now`/H2D active-tray encodings, and the pure effective-profile rules |
+| `src/blflow/filament.h/.cpp` | Device-side glue: resolve the active tray from a `PrinterReport`, the status block, `GET /api/filaments`. The one TU that defines the generated tables |
 | `src/blflow/thermal_math.h` | Header-only, Arduino-free cooling-window arithmetic (buckets, EMA, Newton fit) |
 | `src/blflow/thermal.h/.cpp` | Passive cooling-rate learning: sampling, persistence, status block |
 | `src/blflow/printer_link.h/.cpp` | TLS MQTT client to the printer, in its own FreeRTOS task |
@@ -193,6 +197,10 @@ are used. `CONFIG_VERSION` is `2`.
 | `fan.ki` | float %/°C·s | `0.02` | 0–1; NaN or negative ⇒ 0 |
 | `fan.thermostatPeriodSec` | uint8 s | `5` | 1–60 |
 | `fan.ambientTemp` | uint8 °C | `25` | 0–40. Assumed room temperature; used **only** by the cooling-rate estimate, never by the control loop |
+| `filament.auto` | bool | `true` | Let the loaded material set the chamber target, the cool-down style and the vent floor. `false` ⇒ the plain `fan.*` values are used and no override is applied |
+| `filament.manualId` | `char[24]` | `""` | Guide id used when the printer reports no usable tray (external spool without RFID, P1 without an AMS). An id that is not in the table is cleared by `configValidate()` |
+| `filament.ventFloor.optional` / `.recommended` / `.required` | uint8 % | `0` / `0` / `10` | Minimum output while printing, chosen by the material's `emissions.ventilation`. 0–100; `0` disables the floor |
+| `filament.overrides` | ≤ 12 rules | `[]` | `{"id","chamberTarget","cooldownTarget","ventFloor","postPrintCooling"}`. `id` is a guide id or `"*"`; every other field is optional and `null` means "keep". Rules with an empty `id` are dropped; the array is **replaced** wholesale by a `POST /api/config`, never merged element-wise |
 | `thermal.k` | float[10] | 10 × `null` | Learned Newtonian cooling constants in 1/min: five closed-door buckets (0/25/50/75/100 % fan) then five open-door ones. `null`/NaN = never measured; anything outside `(0, 5]` is reset to `null` |
 | `thermal.samples` | uint32 | `0` | Number of windows blended in so far. Learned, not configured — but it survives a backup/restore round trip |
 | `mqtt.enabled` | bool | `false` | Forced to `false` when `host` is empty |
@@ -417,6 +425,129 @@ path. When the deadline passes, the control loop logs it, clears the deadline an
 
 ---
 
+## Filament-aware cooling
+
+Implements [REWORK-SPEC §16](REWORK-SPEC.md#16-filament-aware-cooling-202). The printer already knows
+what is loaded; the [Filament Field Guide](https://github.com/pwsh/filament-field-guide) already knows
+what each material wants from an enclosure. Joining the two removes the main reason to touch the
+chamber target by hand.
+
+### Data pipeline
+
+```
+filament-field-guide  data/index.json + data/filaments/<id>.json
+        │  tools/gen_filament_db.py  (stdlib only, --src for an offline clone)
+        ▼
+src/blflow/filament_db.h     90 x FilamentInfo (PROGMEM) + 100 x BambuFilament
+        │                    committed; `--check` fails CI when it is stale
+        ▼
+filament_match.h    tray_type / tray_sub_brands / tray_info_idx  ->  guide id + family
+        │           tray_now / device.extruder.snow              ->  active tray
+        │           FilamentInfo + FilamentPolicy                ->  FilamentEffective
+        ▼
+filament.cpp        PrinterReport + Config  ->  FilamentStatus  ->  status JSON
+        ▼
+fan_control.cpp     chamber set point, cool-down target, vent floor, gentle cool-down
+```
+
+`FilamentInfo` keeps only what the controller needs: `id[24]`, `name[32]`, `polymerClass`,
+`chamberMin/Rec/Max` (int8 °C, `-1` = the guide has no figure), `partCoolRec` (uint8 %, `255` =
+unknown), `vent` (0 optional / 1 recommended / 2 required), `flags` (bit0 enclosure recommended,
+bit1 heated chamber required, bit2 enclosure open for cooling, bit3 hardened nozzle) and the two
+emission levels. That is **≈ 6 KB** of flash for the guide plus **≈ 2 KB** for the Bambu id table.
+
+The generator writes declarations for everyone and the definitions behind `BLSF_FILAMENT_DB_DEFINE`,
+which exactly one translation unit defines (`filament.cpp` on the device, the test binary on the
+host) — so the table is linked once however many modules read it. `PROGMEM` is empty on ESP32, whose
+flash is memory-mapped, so the records are read like any other const data.
+
+Regenerating:
+
+```sh
+python3 tools/gen_filament_db.py                          # fetch over HTTPS
+python3 tools/gen_filament_db.py --src ../filament-field-guide
+python3 tools/gen_filament_db.py --src DIR --check         # exit 1 when the header is stale
+```
+
+`--check` compares everything except the `// Fetched:` line, so re-running it on a different day is
+not a failure. The header carries the source URL, the fetch date, the record counts and the CC BY 4.0
+attribution.
+
+### Parser additions
+
+`buildPrinterFilter()` also lets through `ams.tray_now`, `ams.ams[*].{id,tray[*].{id,tray_type,
+tray_sub_brands,tray_info_idx,tray_color}}`, `vt_tray.{…}` and `device.extruder.{state,info[*].{id,
+temp,snow}}`. A filter array applies its first element to every element, so one tray filter covers all
+sixteen slots.
+
+`PrinterReport` gains `trays[4][4]`, `amsId[4]`, `external`, `trayNow`, `extruderState` and
+`extruderSnow[2]` — ~1 KB, still POD, still memcpy-able under the spinlock. Two rules matter:
+
+* **Trays merge, they are never cleared.** P1/A1 firmware sends partial `ams` objects; a report that
+  mentions one tray must not blank the other fifteen. Only an explicit empty `tray_type` empties a
+  slot.
+* **Unit ids are stored, not used as an index** (`amsId[]`), because an AMS-HT reports id 128 or
+  above. `reportTray(report, amsId, slot)` does the lookup; `ams = -1` is the external holder.
+
+### Matcher rules (`filament_match.h`)
+
+`filamentIdentify(trayType, subBrands, trayIdx)` returns a guide `id` (empty = no entry) and a
+`family` string that keeps what the printer said even when the guide has nothing:
+
+1. **Normalise** `tray_type`: upper-case, trim, collapse inner spaces; split at the **first** `-`
+   into BASE and MOD (`PLA-CF` → `PLA`+`CF`, `PAHT-CF` → `PAHT`+`CF`).
+2. **BASE → id** through a fixed table (`PLA`→`pla`, `PAHT`→`pa`, `PA6`→`pa6`, `PPA`→`ppa`, …).
+   `MOD ∈ {CF, GF}` prefers `<id>-cf` / `<id>-gf` **when the guide has that entry**, otherwise the
+   unfilled polymer — the fibre changes the stiffness, not the temperature the enclosure wants.
+   Any other MOD (`AERO`, `AMS`, …) is a marketing suffix and resolves to the base id.
+3. **No usable type** → `tray_info_idx` through the Bambu table → the first word of
+   `tray_sub_brands` ("PLA Basic" → `PLA`) → the id prefix (`GFA`/`GFL`→PLA, `GFB`→ABS, `GFC`→PC,
+   `GFG`→PETG, `GFN`→PA, `GFP`→PP, `GFT`→PPS, `GFU`→TPU).
+4. **Support materials** (`tray_type` starting `SUPPORT`) take the *paired* material's profile:
+   Support For PLA/PETG → `pla`, Support For PA/PET → `pa`, Support for ABS → `abs`, Support W →
+   `pla`, Support G → `pa`. PVA/BVOH/HIPS are materials in their own right and never reach this rule.
+5. A resolved id is always verified against the table, so `id` is either a real guide entry or empty.
+
+**Active tray.** `tray_now` = `ams*4 + slot` (0–15), `254` = the external holder, `255`/absent =
+nothing; a value ≥ 128 is an AMS-HT unit id with a single slot. On an H2D,
+`device.extruder.info[active].snow` = `(ams << 8) | slot` with the active extruder in
+`device.extruder.state >> 4 & 0xF`; an H2D answer wins over `tray_now`, which cannot express two tool
+heads. Only the active tray is matched for control; every tray is kept for the UI.
+
+### Effective profile
+
+```
+keepCool         = flags.enclosureOpenForCooling || (chamberRec != n/a && chamberRec < 35)
+chamberTarget    = keepCool ? chamberMax : chamberRec      // PLA 30, PETG 35, ABS 50, ASA 55, PC 55
+cooldownTarget   = fan.cooldownTarget
+postPrintCooling = partCoolRec >= 50 ? "fast" : "gentle"
+ventFloor        = filament.ventFloor[vent]
+```
+
+For a keep-cool material the **top** of the guide's ambient band is the set point: it is a ceiling
+("do not let it get warmer than this"), not a temperature to reach. When the guide has no ambient
+figure at all the other end of the band is tried, and if there is none the configured `fan.*` value
+stands.
+
+Resolution order: **guide → `"*"` override → id override**, and with `filament.auto` off the plain
+`fan.*` values win outright and no override is applied — the user has said "do not let the filament
+move my set points", and a vent floor pushed by a material would be exactly that.
+
+### What it changes in the control loop
+
+`fanControlLoop()` resolves the profile **every tick** from the snapshot it already holds — 90 string
+compares, microseconds — so there is no cache to invalidate and a tool change mid-print takes effect
+on the next 100 ms pass. It then feeds four things:
+
+| Where | Effect |
+|---|---|
+| Thermostat set point | `chamberTarget` while printing, `cooldownTarget` afterwards. The integral is reset only when the set point moves by **more than 5 °C**, so an override nudging 50 → 48 keeps minutes of accumulated correction |
+| Cool-down window | `chamber <= cooldownTarget` ends the `auto` cool-down early, as before, but against the effective target |
+| Gentle cool-down | While `effectiveMode == "cooldown"` and the material is `gentle`: output 0 % until the chamber is 10 °C below the chamber target, then 50 % at most |
+| Ventilation floor | A minimum target while `printer.printing`, applied after the mode has produced a target and before the ramp. Skipped in `off`/`manual` mode and under the `door`, `preheat` and `stale` rules — those deliberately want the fan stopped |
+
+---
+
 ## Printer link
 
 * `WiFiClientSecure::setInsecure()` (the printer presents a self-signed certificate), port **8883**,
@@ -490,12 +621,27 @@ Examples below assume `H=http://blsmartflow.local`.
 | `GET` | `/api/events` | — | `text/event-stream`; `event: status` every second, `event: log` per new log line |
 | `GET` | `/api/info` | — | `{"fw","build","chipId","sdk","flashSize","sketchSize","freeSketchSpace","partition","resetReason"}` |
 | `GET` | `/api/log` | — | `{"lines":[…]}`, up to 64 lines |
+| `GET` | `/api/filaments` | — | The embedded guide table (below). `Cache-Control: public, max-age=86400` |
 
 ```sh
 curl $H/api/status
 curl -N $H/api/events
 curl $H/api/info
 ```
+
+`GET /api/filaments` returns the whole Filament Field Guide table the firmware carries — about 16 KB,
+fetched once by the UI to populate the material pickers and to explain a matched entry:
+
+```jsonc
+{ "count":90, "source":"https://pwsh.github.io/filament-field-guide", "licence":"CC BY 4.0",
+  "filaments":[ { "id":"abs", "name":"ABS", "cls":"styrenic",
+                  "cMin":40, "cRec":50, "cMax":60, "cool":0,
+                  "vent":"required", "flags":1, "voc":"high", "part":"high" }, … ] }
+```
+
+`cMin`/`cRec`/`cMax` are the ambient band in °C and `cool` the recommended part-cooling percentage;
+all four are `null` where the guide has no figure. `flags` is the bit field from `FilamentInfo`
+(1 enclosure recommended, 2 heated chamber required, 4 enclosure open for cooling, 8 hardened nozzle).
 
 `resetReason` is a string: `UNKNOWN, POWERON, EXT, SW, PANIC, INT_WDT, TASK_WDT, WDT, DEEPSLEEP,
 BROWNOUT, SDIO`. A log line looks like `[   1234] [E] mqtt: connect failed` — 7-column uptime in
@@ -685,6 +831,17 @@ retained to `<base>/state`.
                "sourceTemp":220.4, "setpoint":null, "chamberTarget":45, "cooldownTarget":35,
                "manualSpeed":50, "manualExpiresSec":0, "pwmDuty":140,
                "output1":true, "output2":true },
+  "filament":{ "source":"ams", "auto":true,
+               "tray": { "ams":0, "slot":0, "type":"ABS", "subBrand":null,
+                         "idx":"GFB00", "color":"FFFFFFFF" },
+               "id":"abs", "name":"ABS", "family":"ABS",
+               "profile": { "chamberRec":50, "chamberMax":60, "partCoolRec":0, "vent":"required",
+                            "openForCooling":false, "heatedRequired":false },
+               "effective": { "chamberTarget":50, "cooldownTarget":35, "ventFloor":10,
+                              "postPrintCooling":"gentle", "overridden":false },
+               "trays":[ { "ams":0, "slot":0, "type":"ABS", "subBrand":null, "idx":"GFB00",
+                           "color":"FFFFFFFF", "id":"abs" },
+                         { "ams":-1, "slot":254, "type":"ASA", "idx":"GFB01", "id":"asa" } ] },
   "thermal": { "rateCPerMin":-0.42, "kClosed":[0.31,null,null,null,null],
                "kOpen":[null,null,null,null,null], "samples":7 },
   "mqttExt": { "enabled":true, "connected":true }
@@ -711,6 +868,14 @@ retained to `<base>/state`.
 | `fan.effectiveMode` | `off｜manual｜stale｜door｜preheat｜idle｜cooldown｜chamber｜auto` |
 | `fan.setpoint` | Thermostat set point in force right now, `null` outside `chamber`/`cooldown` |
 | `fan.chamberTarget` / `cooldownTarget` | The **configured** set points, so the HA number entities have a state to read back |
+| `filament.source` | `ams｜external｜manual｜none` — where the active material came from |
+| `filament.auto` | Mirrors `filament.auto` from the config, so the UI can grey the card without a second fetch |
+| `filament.tray` | The active tray, or **`null`** when the printer has not described one. `ams` is `-1` and `slot` `254` for the external holder; every string field is `null` when empty |
+| `filament.id` / `name` | The matched guide entry, `null` when the guide has no entry for this material |
+| `filament.family` | What the printer called it, normalised — `"PA-GF"` even when `id` is `pa`. `null` when nothing is loaded |
+| `filament.profile` | The guide's figures, or `null` when unmatched. `chamberRec`/`chamberMax`/`partCoolRec` are `null` individually where the guide has no figure |
+| `filament.effective` | What the fan controller is actually using this second. `overridden` is true when a `filament.overrides` rule changed at least one of them |
+| `filament.trays` | Every tray the printer has described, empty slots omitted. Feeds the UI's AMS list |
 | `thermal.rateCPerMin` | Current chamber slope in °C/min (negative = cooling), `null` until the fan output and door have been steady for ~20 s |
 | `thermal.kClosed` / `kOpen` | Learned cooling constants in 1/min for fan buckets 0/25/50/75/100 %; `null` where nothing has been measured — **never** NaN |
 | `thermal.samples` | Number of windows blended into the table so far |
@@ -789,9 +954,15 @@ Discovery topic: `<haPrefix>/<component>/blsmartflow_<chipid>/<object_id>/config
 | `sensor` | `printer_wifi` | The printer's own reported RSSI string |
 | `sensor` | `device_rssi` | dBm, `device_class signal_strength` |
 | `sensor` | `uptime` | s, `device_class duration`, `state_class total_increasing` |
+| `sensor` | `filament` | State = the guide's display name (`unknown` when unmatched). Attributes come from the same retained `state` topic via `json_attributes_topic` + `json_attributes_template`: `type`, `idx`, `id`, `family`, `source`, `vent`, `chamberTarget`, `ventFloor`, `postPrintCooling` |
+| `sensor` | `filament_chamber_target` | °C, `device_class temperature`; the **effective** chamber target for the loaded material |
 | `binary_sensor` | `printer_online` | `device_class connectivity` |
 | `binary_sensor` | `door` | `device_class opening`. Publishes the literal `None` while `doorKnown` is false, which Home Assistant renders as *Unknown* — a stuck bit must not be reported as a shut door |
 | `binary_sensor` | `printing` | `device_class running` |
+
+The filament attribute template builds an explicit dictionary rather than dumping the whole block:
+an attribute set that changes shape between updates is what makes a Home Assistant history graph
+unusable.
 
 Every sensor reads its value out of the retained `state` document with a `value_template`. Fields
 that can be `null` (the three temperatures, progress, remaining time, cooling rate) use
@@ -967,7 +1138,7 @@ It then rewrites `firmware/manifest.json`: `version` from `custom_version`, and
 
 ### Tests
 
-`pio test -e native` runs five Unity suites against the Arduino-free headers:
+`pio test -e native` runs six Unity suites against the Arduino-free headers:
 
 | Suite | Covers |
 |---|---|
@@ -975,12 +1146,19 @@ It then rewrites `firmware/manifest.json`: `version` from `custom_version`, and
 | `test/test_parse` | `printer_parse.h` against the captured fixtures, plus door-edge semantics, the packed chamber target, every `reportPhase()` rule and the `stg_cur` name table |
 | `test/test_buffer` | `AutoGrowBufferStream` (with local `Arduino.h` / `Stream.h` shims) |
 | `test/test_thermostat` | `thermostat.h`: proportional response, integral accumulation, the ±100/ki anti-windup clamp, the door and saturation freezes, and the printing → cool-down set-point switch |
+| `test/test_filament` | `filament_match.h` + the AMS half of `printer_parse.h`: **every row of `tools/bambu_filament_ids.csv`** resolved from its type and from its bare id, CF/GF fallbacks, support pairing, the `tray_now` and H2D `snow` encodings, the live AMS fixture, partial-report merging, AMS-HT unit ids, and the effective-profile rules including override precedence |
 | `test/test_thermal` | `thermal_math.h`: bucketing, the EMA blend, recovering a known cooling constant from a synthetic cool-down, and every reason a window is refused |
 
 Fixtures in `test/fixtures/` were captured from a live X1C and sanitised:
 `x1c_push_status.json` (a full `print.push_status`, notably **without** `chamber_temper`, with packed
-`device.*` temperatures and gear-scale fan strings) and `x1c_gcode_line.json` (an acknowledgement
-that the parser must ignore). See `test/fixtures/README.md`.
+`device.*` temperatures and gear-scale fan strings), `x1c_gcode_line.json` (an acknowledgement that
+the parser must ignore) and `x1c_ams_trays.json` (a four-slot AMS with an ABS/PLA/PLA-AERO/PLA load,
+`tray_now: "0"` and an ASA spool on the external holder). See `test/fixtures/README.md`.
+
+Exactly one Bambu filament id is allowed not to resolve: `GFR99` (Generic EVA), because the guide has
+no EVA entry. The matcher reports family `EVA` with an empty id, the status block shows the material
+with no profile, and the configured targets stand. The exception is named in `kKnownUnmatched` in the
+test, so a *second* unresolvable id is a failure rather than a shrug.
 
 ### UI mock server
 
@@ -995,6 +1173,7 @@ fan controller, so `src/www/index.html` can be developed without hardware.
 | `--offline` | The printer never connects: temps and counters `null`, `lastUpdateSec` `null`, `effectiveMode` `stale` |
 | `--auth USER:PASS` | Require HTTP basic auth on every route, as `web.authEnabled` does |
 | `--door` | Start with the door reported open (`doorKnown` still false until the first toggle) |
+| `--filament TYPE` | Overwrite the loaded tray's material, e.g. `--filament PETG`, so the filament card can be exercised with something other than the fixture's ABS |
 
 The simulated printer walks a whole job — idle → preheat → printing → finished/cooling → idle —
 driving `stg_cur`, the temperature targets and therefore `printer.phase`, and it runs a Newtonian
@@ -1002,9 +1181,18 @@ chamber model (`dT/dt = heatIn − k·(T − ambient)`, with `k` raised by the f
 door) so the thermostat and the cooling-rate learning have something real to chew on. It implements
 the same evaluation order, the same PI step and the same window logic as the firmware.
 
-`POST /mock/door` is the one route that is **not** part of the device API: `{"open":true}`,
+The fake AMS is the captured `test/fixtures/x1c_ams_trays.json`, and the mock reads
+`src/blflow/filament_db.h` back with a regular expression rather than carrying its own copy of the
+guide — one source of truth, so a regenerated database needs no change in the mock. It mirrors
+`filamentIdentify()` and `filamentEffective()` line for line, including the vent floor and the gentle
+cool-down.
+
+`POST /mock/door` and `POST /mock/tray` are the two routes that are **not** part of the device API: `{"open":true}`,
 `{"open":false}` or `{"toggle":true}` stands in for someone opening the printer, so the door rules
 can be demonstrated. It answers `{"ok":true,"changed":…,"doorOpen":…,"doorEdgeCount":…}`.
+`POST /mock/tray {"now":"0"}` stands in for the printer switching trays — `0`–`15` for an AMS slot,
+`254` for the external holder, `255` for nothing loaded — and answers with the resulting `filament`
+block.
 
 ### CI
 
