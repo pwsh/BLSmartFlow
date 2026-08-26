@@ -80,4 +80,17 @@ def compress_files():
 
     print(f"\n✅ All files combined into: {OUTPUT_HEADER_FILE}")
 
+
+# ---------------------------------------------------------------------------- #
+#  Build stamp: __DATE__/__TIME__ only refresh when the including TU is         #
+#  recompiled, so write a header on every build instead.                        #
+# ---------------------------------------------------------------------------- #
+import datetime
+STAMP = os.path.join("src", "blflow", "build_stamp.h")
+stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+new_stamp = f'#pragma once\n#define FW_BUILD_STAMP "{stamp}"\n'
+with open(STAMP, "w") as f:
+    f.write(new_stamp)
+print(f"Build stamp: {stamp}")
+
 compress_files()

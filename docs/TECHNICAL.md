@@ -886,6 +886,20 @@ solid = OK. A blink pattern is *N* × 200 ms on/off followed by an 800 ms gap.
 
 ---
 
+### Pitfalls learned on hardware
+
+* **ArduinoJson stores `const char*` by pointer.** Only `char*` (non-const), `String` and `std::string` are
+  copied into the document. Assigning a field of a *local* `const` struct (for example a `PrinterState`
+  snapshot) and serialising after the function returned produces garbage. `status.cpp` and
+  `config.cpp` wrap every char-array field in `String()` for that reason — keep doing so.
+* **SSE needs the `Accept: text/event-stream` header.** `AsyncEventSource` answers 404 to any other
+  client, so `curl /api/events` without the header is not a valid test; browsers send it automatically.
+* **Captive-portal mini browsers may open an EventSource that never delivers.** The UI therefore polls in
+  AP mode, keeps polling until the stream delivers its first event, and falls back to polling after 5 s
+  of silence.
+* **`__DATE__`/`__TIME__` only refresh when their translation unit is recompiled.** `pre_build.py`
+  writes `src/blflow/build_stamp.h` on every build so `/api/info.build` is always current.
+
 ## Known limitations
 
 * **H2D support is best effort.** The `device.airduct.parts[]` → part/aux/chamber mapping is inferred

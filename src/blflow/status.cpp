@@ -48,6 +48,10 @@ void buildStatus(JsonObject out)
     const Config& c = cfg();
     const PrinterState p = printerSnapshot();
     const FanState f = fanSnapshot();
+    // NOTE: p and f are locals. ArduinoJson stores a `const char*` by POINTER
+    // (it assumes string literals) and only deep-copies `char*`/String, so every
+    // char-array field below is wrapped in String() - the document outlives this
+    // function and a bare pointer into p/f would serialise as garbage.
 
     JsonObject d = out["device"].to<JsonObject>();
     d["fw"] = FW_VERSION;
@@ -55,7 +59,7 @@ void buildStatus(JsonObject out)
     d["heapFree"] = ESP.getFreeHeap();
     d["heapMin"] = ESP.getMinFreeHeap();
     d["chipId"] = chipId();
-    d["hostname"] = c.wifi.hostname;
+    d["hostname"] = String(c.wifi.hostname);
     d["ip"] = wifiIp().toString();
     d["apMode"] = wifiIsApMode();
 
@@ -77,8 +81,8 @@ void buildStatus(JsonObject out)
     if (age == UINT32_MAX) pr["lastUpdateSec"] = nullptr;
     else pr["lastUpdateSec"] = age / 1000;
     pr["mqttState"] = p.mqttState;
-    pr["mqttStateText"] = p.mqttStateText;
-    pr["state"] = p.gcodeState;
+    pr["mqttStateText"] = String(p.mqttStateText);
+    pr["state"] = String(p.gcodeState);
     pr["printing"] = printerIsPrinting(p);
     setCount(pr, "stage", p.stage);
     pr["stageText"] = stageText(p.stage);
@@ -86,10 +90,10 @@ void buildStatus(JsonObject out)
     setCount(pr, "remainingMin", p.remainingMin);
     setCount(pr, "layer", p.layer);
     setCount(pr, "totalLayers", p.totalLayers);
-    pr["task"] = p.task;
+    pr["task"] = String(p.task);
     pr["doorOpen"] = p.doorOpen;
     pr["printError"] = p.printError;
-    pr["wifiSignal"] = p.wifiSignal;
+    pr["wifiSignal"] = String(p.wifiSignal);
 
     JsonObject t = pr["temps"].to<JsonObject>();
     setTemp(t, "nozzle", p.nozzle);
@@ -107,9 +111,9 @@ void buildStatus(JsonObject out)
     JsonObject fo = out["fan"].to<JsonObject>();
     fo["output"] = lroundf(f.output);
     fo["target"] = lroundf(f.target);
-    fo["mode"] = c.fan.mode;
-    fo["effectiveMode"] = f.effectiveMode;
-    fo["source"] = c.fan.source;
+    fo["mode"] = String(c.fan.mode);
+    fo["effectiveMode"] = String(f.effectiveMode);
+    fo["source"] = String(c.fan.source);
     setTemp(fo, "sourceTemp", f.sourceTemp);
     fo["manualSpeed"] = c.fan.manualSpeed;
     fo["manualExpiresSec"] = fanManualExpiresInSec();

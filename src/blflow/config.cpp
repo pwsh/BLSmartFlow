@@ -485,25 +485,27 @@ void configWipe()
 
 void configToJson(JsonObject out, const Config& c, bool masked)
 {
+    // Strings are wrapped in String() so ArduinoJson copies them: a bare
+    // `const char*` is stored by pointer and would dangle if `c` were a local.
     out["version"] = c.version;
 
     JsonObject w = out["wifi"].to<JsonObject>();
-    w["ssid"] = c.wifi.ssid;
-    w["password"] = (masked && c.wifi.password[0]) ? kMask : c.wifi.password;
-    w["bssid"] = c.wifi.bssid;
+    w["ssid"] = String(c.wifi.ssid);
+    w["password"] = (masked && c.wifi.password[0]) ? String(kMask) : String(c.wifi.password);
+    w["bssid"] = String(c.wifi.bssid);
     w["lockBssid"] = c.wifi.lockBssid;
-    w["hostname"] = c.wifi.hostname;
+    w["hostname"] = String(c.wifi.hostname);
 
     JsonObject p = out["printer"].to<JsonObject>();
-    p["ip"] = c.printer.ip;
-    p["accessCode"] = (masked && c.printer.accessCode[0]) ? kMask : c.printer.accessCode;
-    p["serial"] = c.printer.serial;
-    p["model"] = c.printer.model;
+    p["ip"] = String(c.printer.ip);
+    p["accessCode"] = (masked && c.printer.accessCode[0]) ? String(kMask) : String(c.printer.accessCode);
+    p["serial"] = String(c.printer.serial);
+    p["model"] = String(c.printer.model);
 
     JsonObject f = out["fan"].to<JsonObject>();
     curveToJson(f["curve"].to<JsonArray>(), c.fan.curve);
-    f["source"] = c.fan.source;
-    f["mode"] = c.fan.mode;
+    f["source"] = String(c.fan.source);
+    f["mode"] = String(c.fan.mode);
     f["manualSpeed"] = c.fan.manualSpeed;
     f["minSpeed"] = c.fan.minSpeed;
     f["kickStart"] = c.fan.kickStart;
@@ -517,27 +519,27 @@ void configToJson(JsonObject out, const Config& c, bool masked)
     f["onlyWhilePrinting"] = c.fan.onlyWhilePrinting;
     f["cooldownMin"] = c.fan.cooldownMin;
     f["staleSec"] = c.fan.staleSec;
-    f["staleMode"] = c.fan.staleMode;
+    f["staleMode"] = String(c.fan.staleMode);
     f["staleSpeed"] = c.fan.staleSpeed;
 
     JsonObject m = out["mqtt"].to<JsonObject>();
     m["enabled"] = c.mqtt.enabled;
-    m["host"] = c.mqtt.host;
+    m["host"] = String(c.mqtt.host);
     m["port"] = c.mqtt.port;
-    m["user"] = c.mqtt.user;
-    m["password"] = (masked && c.mqtt.password[0]) ? kMask : c.mqtt.password;
-    m["baseTopic"] = c.mqtt.baseTopic;
+    m["user"] = String(c.mqtt.user);
+    m["password"] = (masked && c.mqtt.password[0]) ? String(kMask) : String(c.mqtt.password);
+    m["baseTopic"] = String(c.mqtt.baseTopic);
     m["haDiscovery"] = c.mqtt.haDiscovery;
-    m["haPrefix"] = c.mqtt.haPrefix;
+    m["haPrefix"] = String(c.mqtt.haPrefix);
     m["publishIntervalSec"] = c.mqtt.publishIntervalSec;
 
     JsonObject wb = out["web"].to<JsonObject>();
     wb["authEnabled"] = c.web.authEnabled;
-    wb["user"] = c.web.user;
-    wb["password"] = (masked && c.web.password[0]) ? kMask : c.web.password;
+    wb["user"] = String(c.web.user);
+    wb["password"] = (masked && c.web.password[0]) ? String(kMask) : String(c.web.password);
 
     JsonObject d = out["debug"].to<JsonObject>();
-    d["serial"] = c.debug.serial;
+    d["serial"] = String(c.debug.serial);
     d["mqttDump"] = c.debug.mqttDump;
 
     JsonObject s = out["ssdp"].to<JsonObject>();

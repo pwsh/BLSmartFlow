@@ -12,7 +12,8 @@
 #endif
 
 #define FW_VERSION   STRVERSION
-#define FW_BUILD     __DATE__ " " __TIME__
+#include "build_stamp.h"
+#define FW_BUILD FW_BUILD_STAMP
 #define FW_NAME      "BLSmartFlow"
 
 #endif  // BLSF_VERSION_H
