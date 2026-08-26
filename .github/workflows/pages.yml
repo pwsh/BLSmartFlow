@@ -6,6 +6,8 @@ on:
     paths:
       - "site/**"
       - "mkdocs.yml"
+      - "firmware/manifest.json"
+      - "firmware/esp32dev/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -37,6 +39,24 @@ jobs:
 
       - name: Build site
         run: mkdocs build --strict
+
+      # The web-flasher page needs the manifest and the image it references on the
+      # same origin as the site (ESP Web Tools fetches them from the browser).
+      - name: Publish firmware image next to the site
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil
+          m = json.load(open("firmware/manifest.json"))
+          out = "build/site/firmware"
+          os.makedirs(os.path.join(out, "esp32dev"), exist_ok=True)
+          for build in m["builds"]:
+              for part in build["parts"]:
+                  src = os.path.join("firmware", part["path"])
+                  shutil.copy(src, os.path.join(out, part["path"]))
+                  shutil.copy(src, os.path.join(out, "latest.bin"))
+                  print("published", src)
+          json.dump(m, open(os.path.join(out, "manifest.json"), "w"), indent=2)
+          PY
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4

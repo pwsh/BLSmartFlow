@@ -95,6 +95,7 @@ nav:
   - Getting started:
       - What you need: getting-started/what-you-need.md
       - Flashing the firmware: getting-started/flashing.md
+      - Web flasher: getting-started/web-flasher.md
       - First-time setup: getting-started/first-setup.md
       - Connecting the printer: getting-started/connect-printer.md
       - Your first fan curve: getting-started/first-fan-curve.md

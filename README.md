@@ -40,8 +40,8 @@ in LAN Only Mode.
 
 ## Quick start
 
-1. **Flash** the merged image `BLSmartflow_V<version>.bin` at offset `0x0` with the
-   [web flasher](https://www.dutchdevelop.com/blsmartflow) or `esptool write_flash 0x0 <file>`.
+1. **Flash** over USB with the [web flasher](https://pwsh.github.io/BLSmartFlow/getting-started/web-flasher/)
+   (Chrome/Edge) or `esptool write_flash 0x0 firmware/esp32dev/BLSmartflow_<version>.bin`.
    Upgrading from a 2025.x firmware needs this full flash once, and it erases the settings.
 2. **Join `BLSmartFlow-xxxx`** (open network). The setup page opens by itself; if it does not, browse
    to <http://192.168.4.1/>.
