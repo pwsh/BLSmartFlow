@@ -317,7 +317,7 @@ void handlePostFan(AsyncWebServerRequest* request, JsonVariant& json)
 
     bool persist = true;
     if (!fanApplyMode(mode, speed, duration, persist)) {
-        sendError(request, 400, "mode must be auto, manual or off");
+        sendError(request, 400, "mode must be auto, chamber, manual or off");
         return;
     }
     // Never save inline: the dashboard slider posts here on every drag, and a

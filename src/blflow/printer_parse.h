@@ -17,7 +17,14 @@
 //     target (extruder 9175180 -> 140/140, bed 7864440 -> 120/120, ctc 43 -> 43/0).
 //   * Fan speeds are decimal strings on a 0..15 gear scale.
 //   * `home_flag` arrives as a negative int32 and must be read as uint32 before
-//     the door bit (23) is tested.
+//     the door bit (23) is tested. It is the front-door plunger switch; the top
+//     lid has no sensor at all.
+//   * On some X1C units the closed door does not actuate that switch, so the bit
+//     sits at "open" forever (pressing the switch by hand flips it). A raw bit is
+//     therefore not evidence of anything until it has been seen to *change*:
+//     `doorKnown` only becomes true on the first edge, and until then the door is
+//     treated as closed. The very first report establishes the raw state and is
+//     never an edge - otherwise every MQTT reconnect would look like a door event.
 
 #ifndef BLSF_PRINTER_PARSE_H
 #define BLSF_PRINTER_PARSE_H
@@ -44,15 +51,34 @@ struct PrinterReport {
     int      layer;
     int      totalLayers;
     char     task[64];           // subtask_name
-    bool     doorOpen;
+    bool     doorOpen;           // raw bit 23 - meaningless until doorKnown
+    bool     doorRawSeen;        // a report has carried home_flag at least once
+    bool     doorKnown;          // an EDGE has been seen, i.e. the switch works
+    uint16_t doorEdgeCount;      // transitions since boot (the first report is not one)
+    uint32_t lastDoorOpenMs;     // millis() of the last open edge, 0 = never
+    uint32_t lastDoorCloseMs;    // millis() of the last close edge, 0 = never
     uint32_t printError;
     char     wifiSignal[12];     // e.g. "-32dBm"
 
     float    nozzle, nozzleTarget;
     float    bed, bedTarget;
-    float    chamber;
+    float    chamber, chamberTarget;
 
     int8_t   fanPart, fanAux, fanChamber, fanHeatbreak;   // percent, -1 unknown
+};
+
+// Print phase, derived from gcode_state + stg_cur + the temperature targets
+// (REWORK-SPEC 15.1). This is what the fan logic reasons about: "RUNNING" alone
+// cannot tell a chamber that is still heating from one that is at temperature.
+enum class Phase : uint8_t {
+    Offline,    // no report yet / link down
+    Paused,
+    Preheat,
+    Cooling,
+    Printing,
+    Finished,
+    Failed,
+    Idle,
 };
 
 namespace detail {
@@ -81,8 +107,128 @@ inline void printerReportInit(PrinterReport& r)
     r.remainingMin = -1;
     r.layer = -1;
     r.totalLayers = -1;
-    r.nozzle = r.nozzleTarget = r.bed = r.bedTarget = r.chamber = REPORT_TEMP_UNKNOWN;
+    r.nozzle = r.nozzleTarget = r.bed = r.bedTarget = REPORT_TEMP_UNKNOWN;
+    r.chamber = r.chamberTarget = REPORT_TEMP_UNKNOWN;
     r.fanPart = r.fanAux = r.fanChamber = r.fanHeatbreak = REPORT_FAN_UNKNOWN;
+}
+
+// ha-bambulab CURRENT_STAGE_IDS, in the snake_case spelling the 2.0 API already
+// publishes as `printer.stageText` (REWORK-SPEC 9 pins -1/255 to "idle"). Codes
+// 36..77 come from H2D-era firmware and are best-effort. -2 is our own "the
+// printer is not reachable" value.
+inline const char* stageName(int stage)
+{
+    switch (stage) {
+        case -2: return "offline";
+        case -1:
+        case 255: return "idle";
+        case 0:  return "printing";
+        case 1:  return "auto_bed_leveling";
+        case 2:  return "heatbed_preheating";
+        case 3:  return "sweeping_xy_mech_mode";
+        case 4:  return "changing_filament";
+        case 5:  return "m400_pause";
+        case 6:  return "paused_filament_runout";
+        case 7:  return "heating_hotend";
+        case 8:  return "calibrating_extrusion";
+        case 9:  return "scanning_bed_surface";
+        case 10: return "inspecting_first_layer";
+        case 11: return "identifying_build_plate_type";
+        case 12: return "calibrating_micro_lidar";
+        case 13: return "homing_toolhead";
+        case 14: return "cleaning_nozzle_tip";
+        case 15: return "checking_extruder_temperature";
+        case 16: return "paused_user";
+        case 17: return "paused_front_cover_falling";
+        case 18: return "calibrating_lidar";
+        case 19: return "calibrating_extrusion_flow";
+        case 20: return "paused_nozzle_temperature_malfunction";
+        case 21: return "paused_heat_bed_temperature_malfunction";
+        case 22: return "filament_unloading";
+        case 23: return "paused_skipped_step";
+        case 24: return "filament_loading";
+        case 25: return "calibrating_motor_noise";
+        case 26: return "paused_ams_lost";
+        case 27: return "paused_low_fan_speed_heat_break";
+        case 28: return "paused_chamber_temperature_control_error";
+        case 29: return "cooling_chamber";
+        case 30: return "paused_by_gcode";
+        case 31: return "motor_noise_showoff";
+        case 32: return "paused_nozzle_filament_covered_detected";
+        case 33: return "paused_cutter_error";
+        case 34: return "paused_first_layer_error";
+        case 35: return "paused_nozzle_clog";
+        case 36: return "check_absolute_accuracy_before_calibration";
+        case 37: return "absolute_accuracy_calibration";
+        case 38: return "check_absolute_accuracy_after_calibration";
+        case 39: return "calibrate_nozzle_offset";
+        case 40: return "bed_level_high_temperature";
+        case 41: return "check_quick_release";
+        case 42: return "check_door_and_cover";
+        case 43: return "laser_calibration";
+        case 44: return "check_platform";
+        case 45: return "check_birds_eye_camera_position";
+        case 46: return "calibrate_birds_eye_camera";
+        case 47: return "bed_level_phase_1";
+        case 48: return "bed_level_phase_2";
+        case 49: return "heating_chamber";
+        case 50: return "heatbed_cooling";
+        case 51: return "print_calibration_lines";
+        case 52: return "check_material";
+        case 53: return "calibrating_live_view_camera";
+        case 54: return "waiting_for_heatbed_temperature";
+        case 55: return "check_material_position";
+        case 56: return "calibrating_cutter_model_offset";
+        case 57: return "measuring_surface";
+        case 58: return "thermal_preconditioning";
+        case 59: return "homing_blade_holder";
+        case 60: return "calibrating_camera_offset";
+        case 61: return "calibrating_blade_holder_position";
+        case 62: return "hotend_pick_place_test";
+        case 63: return "waiting_for_chamber_temperature";
+        case 64: return "preparing_hotend";
+        case 65: return "calibrating_nozzle_clumping_detection";
+        case 66: return "purifying_chamber_air";
+        case 67: return "measuring_rotary_attachment";
+        case 68: return "moving_toolhead_above_purge_chute";
+        case 69: return "cooling_nozzle";
+        case 70: return "moving_toolhead_to_center_of_heatbed";
+        case 71: return "active_arc_fitting";
+        case 72: return "hotend_type_detection";
+        case 73: return "build_plate_alignment_detection";
+        case 74: return "heatbed_surface_foreign_object_detection";
+        case 75: return "heatbed_underside_foreign_object_detection";
+        case 76: return "pre_extrusion_before_printing";
+        case 77: return "preparing_ams";
+        default: return "unknown";
+    }
+}
+
+// Stages the printer sits in while a job is suspended (BLLED stageIsPause()).
+inline bool stageIsPause(int stage)
+{
+    switch (stage) {
+        case 5: case 6: case 16: case 17: case 20: case 21: case 23: case 26:
+        case 27: case 28: case 30: case 32: case 33: case 34: case 35:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Stages that are unambiguously "still bringing something up to temperature".
+inline bool stageIsPreheat(int stage)
+{
+    switch (stage) {
+        case 2: case 7: case 49: case 54: case 58: case 63: case 64: return true;
+        default: return false;
+    }
+}
+
+// Stages that are unambiguously "actively getting rid of heat".
+inline bool stageIsCooling(int stage)
+{
+    return stage == 29 || stage == 50 || stage == 69;
 }
 
 // Commands that carry acknowledgements rather than state.
@@ -164,7 +310,9 @@ inline bool packedFrom(JsonVariantConst v, uint32_t& out)
 // containing "print") carries. Returns false when the message is an ack, is
 // empty after filtering, or has no "print" object - in which case `out` is
 // untouched and the caller should not treat it as a fresh update.
-inline bool parsePrinterReport(JsonVariantConst root, PrinterReport& out)
+// `nowMs` timestamps the door edges (millis() on the device). Passing 0 - the
+// default, used by tests that do not care - simply records 0.
+inline bool parsePrinterReport(JsonVariantConst root, PrinterReport& out, uint32_t nowMs = 0)
 {
     JsonVariantConst print = root["print"];
     if (!print.is<JsonObjectConst>()) return false;
@@ -199,8 +347,12 @@ inline bool parsePrinterReport(JsonVariantConst root, PrinterReport& out)
             if (!hasBed) out.bed = packedCurrent(packed);
             if (!hasBedTarget) out.bedTarget = packedTarget(packed);
         }
-        if (!hasChamber && detail::packedFrom(dev["ctc"]["info"]["temp"], packed)) {
-            out.chamber = packedCurrent(packed);
+        if (detail::packedFrom(dev["ctc"]["info"]["temp"], packed)) {
+            if (!hasChamber) out.chamber = packedCurrent(packed);
+            // The high word is the active-chamber-heater set point. It reads 0 on
+            // every printer without one, which is "no target", not "target 0 C".
+            const float ct = packedTarget(packed);
+            out.chamberTarget = ct > 0.0f ? ct : REPORT_TEMP_UNKNOWN;
         }
         // H2D air duct: each part's "state" is already a percentage.
         JsonArrayConst parts = dev["airduct"]["parts"];
@@ -248,23 +400,87 @@ inline bool parsePrinterReport(JsonVariantConst root, PrinterReport& out)
     if (p["wifi_signal"].is<const char*>())
         detail::copyStr(out.wifiSignal, sizeof(out.wifiSignal), p["wifi_signal"].as<const char*>());
 
-    // home_flag is signed on the wire; bit 23 is the door/cover switch.
+    // home_flag is signed on the wire; bit 23 is the door/cover switch (front
+    // door OR top lid - the printer does not distinguish them).
     if (p["home_flag"].is<float>()) {
         const uint32_t hf = (uint32_t)(int64_t)p["home_flag"].as<int64_t>();
-        out.doorOpen = (hf & (1UL << 23)) != 0;
+        const bool open = (hf & (1UL << 23)) != 0;
+        if (!out.doorRawSeen) {
+            // First sighting: this is the raw state, not a transition, and it is
+            // not proof that the switch works - on some X1C units it reads
+            // "open" from boot to power-off.
+            out.doorRawSeen = true;
+            out.doorOpen = open;
+        } else if (open != out.doorOpen) {
+            out.doorOpen = open;
+            out.doorKnown = true;     // it moved, so this printer really reports it
+            if (out.doorEdgeCount < 0xFFFFu) out.doorEdgeCount++;
+            if (open) out.lastDoorOpenMs = nowMs;
+            else      out.lastDoorCloseMs = nowMs;
+        }
     }
 
     return true;
 }
 
-// True when the printer is actively working on a job.
-inline bool reportIsPrinting(const PrinterReport& r)
+// Print phase (REWORK-SPEC 15.1). First rule that matches wins. Pure: the caller
+// substitutes Offline when the link itself is down, which this function cannot
+// see - it only knows that a report with no gcode_state has told it nothing.
+inline Phase reportPhase(const PrinterReport& r)
 {
-    return strcmp(r.gcodeState, "RUNNING") == 0 ||
-           strcmp(r.gcodeState, "PAUSE") == 0 ||
-           strcmp(r.gcodeState, "PREPARE") == 0 ||
-           strcmp(r.gcodeState, "SLICING") == 0;
+    const char* gs = r.gcodeState;
+    if (gs[0] == '\0' || strcmp(gs, "OFFLINE") == 0 || r.stage == -2) return Phase::Offline;
+
+    if (strcmp(gs, "PAUSE") == 0 || stageIsPause(r.stage)) return Phase::Paused;
+
+    const bool running = strcmp(gs, "RUNNING") == 0;
+    // A bed or chamber still climbing towards its set point is a preheat even
+    // when the printer already calls itself RUNNING - that is exactly the window
+    // in which an exhaust fan would be fighting the heaters.
+    const bool warmingUp =
+        running && ((!isnan(r.bedTarget) && r.bedTarget > 0.0f &&
+                     !isnan(r.bed) && r.bed < r.bedTarget - 3.0f) ||
+                    (!isnan(r.chamberTarget) && r.chamberTarget > 0.0f &&
+                     !isnan(r.chamber) && r.chamber < r.chamberTarget - 2.0f));
+    if (stageIsPreheat(r.stage) || warmingUp) return Phase::Preheat;
+
+    if (stageIsCooling(r.stage)) return Phase::Cooling;
+
+    if (running || strcmp(gs, "PREPARE") == 0 || strcmp(gs, "SLICING") == 0) return Phase::Printing;
+    if (strcmp(gs, "FINISH") == 0) return Phase::Finished;
+    if (strcmp(gs, "FAILED") == 0) return Phase::Failed;
+    return Phase::Idle;
 }
+
+inline const char* phaseName(Phase p)
+{
+    switch (p) {
+        case Phase::Offline:  return "offline";
+        case Phase::Paused:   return "paused";
+        case Phase::Preheat:  return "preheat";
+        case Phase::Cooling:  return "cooling";
+        case Phase::Printing: return "printing";
+        case Phase::Finished: return "finished";
+        case Phase::Failed:   return "failed";
+        case Phase::Idle:     break;
+    }
+    return "idle";
+}
+
+// True when the printer is busy with a job, i.e. what `onlyWhilePrinting` gates
+// on. REWORK-SPEC 15.1 defines it as phase in {preheat, printing, paused}, which
+// keeps a stage-2 preheat inside the print even before gcode_state moves.
+// The door state the control loop is allowed to act on. Until an edge has proved
+// that the switch works, "closed" is the only safe reading: a printer whose bit
+// is stuck at 1 would otherwise sit under the door rule for every print.
+inline bool reportDoorOpen(const PrinterReport& r) { return r.doorKnown && r.doorOpen; }
+
+inline bool phaseIsPrinting(Phase p)
+{
+    return p == Phase::Preheat || p == Phase::Printing || p == Phase::Paused;
+}
+
+inline bool reportIsPrinting(const PrinterReport& r) { return phaseIsPrinting(reportPhase(r)); }
 
 }  // namespace blsf
 

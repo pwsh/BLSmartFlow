@@ -40,8 +40,11 @@ full HTTP / MQTT / serial contracts.
 | `src/blflow/log.h/.cpp` | `LOGI/LOGW/LOGE` → Serial (gated on `debug.serial`) plus a 64-line × 120-byte ring buffer, spinlock-guarded, with a monotonic sequence counter for SSE |
 | `src/blflow/config.h/.cpp` | The `Config` POD, defaults, `configValidate()`, LittleFS persistence, legacy migration, masked JSON, deep merge |
 | `src/blflow/curve.h` | Header-only, Arduino-free curve model: `curveValidate()`, `curveInterpolate()`, `curveDefaults()` |
-| `src/blflow/state.h/.cpp` | `PrinterState` / `FanState` snapshots under `portMUX` spinlocks; the `stg_cur` and PubSubClient state tables |
-| `src/blflow/printer_parse.h` | Header-only, Arduino-free Bambu report parser (filter + field extraction) |
+| `src/blflow/state.h/.cpp` | `PrinterState` / `FanState` snapshots under `portMUX` spinlocks; the PubSubClient state table |
+| `src/blflow/printer_parse.h` | Header-only, Arduino-free Bambu report parser (filter + field extraction), the full `stg_cur` name table and the pure `reportPhase()` |
+| `src/blflow/thermostat.h` | Header-only, Arduino-free PI step for the chamber thermostat (anti-windup + freeze flags) |
+| `src/blflow/thermal_math.h` | Header-only, Arduino-free cooling-window arithmetic (buckets, EMA, Newton fit) |
+| `src/blflow/thermal.h/.cpp` | Passive cooling-rate learning: sampling, persistence, status block |
 | `src/blflow/printer_link.h/.cpp` | TLS MQTT client to the printer, in its own FreeRTOS task |
 | `src/blflow/ha_mqtt.h/.cpp` | External broker client, Home Assistant discovery, command topics |
 | `src/blflow/fan_control.h/.cpp` | LEDC setup and the control state machine |
@@ -164,7 +167,7 @@ are used. `CONFIG_VERSION` is `2`.
 | `printer.model` | `char[6]` | `auto` | `auto｜x1｜p1｜a1｜h2d`, case-insensitive, anything else ⇒ `auto`. Drives the `pushall` cadence |
 | `fan.curve` | ≤ 16 points | 5-point default | Sorted ascending, duplicates collapsed (last wins), temps 0–400 °C, speeds 0–100 %. Fewer than 2 usable points ⇒ the default curve is restored |
 | `fan.source` | `char[8]` | `nozzle` | `nozzle｜bed｜chamber｜max`, else `nozzle` |
-| `fan.mode` | `char[8]` | `auto` | `auto｜manual｜off`, else `auto`. Persisted |
+| `fan.mode` | `char[8]` | `auto` | `auto｜chamber｜manual｜off`, else `auto`. Persisted. `chamber` = PI thermostat on the chamber temperature |
 | `fan.manualSpeed` | uint8 % | `50` | 0–100 |
 | `fan.minSpeed` | uint8 % | `0` | 0–100. Outputs strictly below it are forced to 0 %; `0` disables the clamp |
 | `fan.kickStart` | bool | `true` | Full-duty pulse when leaving standstill |
@@ -179,6 +182,19 @@ are used. `CONFIG_VERSION` is `2`.
 | `fan.staleSec` | uint16 s | `120` | 10–3600 |
 | `fan.staleMode` | `char[6]` | `off` | `hold｜off｜fixed`, else `off` |
 | `fan.staleSpeed` | uint8 % | `0` | 0–100, used by `staleMode: "fixed"` |
+| `fan.doorMode` | `char[8]` | `ignore` | `ignore｜off｜fixed`, else `ignore`. What the fan does while the front door is open. Inert until `doorKnown` |
+| `fan.doorSpeed` | uint8 % | `0` | 0–100, used by `doorMode: "fixed"` |
+| `fan.doorResumeSec` | uint16 s | `5` | 0–300. The door rule stays armed this long after the door closes (anti-flap) |
+| `fan.preheatMode` | `char[8]` | `off` | `ignore｜off｜fixed`, else `off`. What the fan does while `phase == preheat` |
+| `fan.preheatSpeed` | uint8 % | `0` | 0–100, used by `preheatMode: "fixed"` |
+| `fan.chamberTarget` | uint8 °C | `45` | 20–80. Thermostat set point while printing |
+| `fan.cooldownTarget` | uint8 °C | `35` | 15–60. Thermostat set point after a print; **also** ends the `auto` cool-down window early |
+| `fan.kp` | float %/°C | `8.0` | 0–50; NaN or negative ⇒ 0 |
+| `fan.ki` | float %/°C·s | `0.02` | 0–1; NaN or negative ⇒ 0 |
+| `fan.thermostatPeriodSec` | uint8 s | `5` | 1–60 |
+| `fan.ambientTemp` | uint8 °C | `25` | 0–40. Assumed room temperature; used **only** by the cooling-rate estimate, never by the control loop |
+| `thermal.k` | float[10] | 10 × `null` | Learned Newtonian cooling constants in 1/min: five closed-door buckets (0/25/50/75/100 % fan) then five open-door ones. `null`/NaN = never measured; anything outside `(0, 5]` is reset to `null` |
+| `thermal.samples` | uint32 | `0` | Number of windows blended in so far. Learned, not configured — but it survives a backup/restore round trip |
 | `mqtt.enabled` | bool | `false` | Forced to `false` when `host` is empty |
 | `mqtt.host` / `port` | `char[64]` / uint16 | `""` / `1883` | Port `0` ⇒ `1883`. Plain TCP, no TLS |
 | `mqtt.user` / `password` | `char[33]` / `char[65]` | `""` | Password is a secret (masked). Empty user ⇒ anonymous connect |
@@ -239,23 +255,127 @@ An unreadable legacy file is discarded rather than fatal.
 something raised the "recompute now" flag). It works off a `FanConfig` copy taken under the config
 lock and a `PrinterState` snapshot.
 
+### Print phase
+
+The fan logic reasons about a derived **phase**, not about `gcode_state`, because `RUNNING` alone
+cannot tell a chamber that is still heating from one that is at temperature.
+`reportPhase(const PrinterReport&)` lives in `printer_parse.h` (Arduino-free, host-tested); `state.h`
+wraps it as `printerPhase(const PrinterState&)`, which additionally reports `offline` when no report
+has ever arrived. First rule that matches wins:
+
+| Phase | Rule |
+|---|---|
+| `offline` | `gcode_state` empty or `OFFLINE`, or `stg_cur == -2`, or no report ever received |
+| `paused` | `gcode_state == PAUSE`, or `stg_cur ∈ {5,6,16,17,20,21,23,26,27,28,30,32,33,34,35}` |
+| `preheat` | `stg_cur ∈ {2,7,49,54,58,63,64}`, or `RUNNING` **and** (`bedTarget > 0 && bed < bedTarget − 3`) or (`chamberTarget > 0 && chamber < chamberTarget − 2`) |
+| `cooling` | `stg_cur ∈ {29,50,69}` |
+| `printing` | `gcode_state ∈ {RUNNING, PREPARE, SLICING}` |
+| `finished` | `gcode_state == FINISH` |
+| `failed` | `gcode_state == FAILED` |
+| `idle` | otherwise |
+
+**`printing` = phase ∈ {`preheat`, `printing`, `paused`}**, and that is what `onlyWhilePrinting`,
+`printer.printing` and the HA `printing` binary sensor all use. `stageName()` (also in
+`printer_parse.h`) covers the whole ha-bambulab table `0..77` plus `-1`/`255` → `idle` and `-2` →
+`offline`, in the snake_case spelling `printer.stageText` has always published.
+
+### Door
+
+`home_flag` bit 23 is the **front-door plunger switch**. The top lid has **no sensor at all**, so
+lifting it changes nothing.
+
+On some X1C units the closed door does not actuate that switch, so the bit sits at `1` from boot to
+power-off (pressing the switch by hand flips it). A raw bit is therefore not evidence of anything
+until it has been seen to *change*:
+
+| Field | Meaning |
+|---|---|
+| `doorOpen` | The raw bit — recorded, but meaningless on its own |
+| `doorRawSeen` | A report has carried `home_flag` at least once |
+| `doorKnown` | **An edge has been observed**, i.e. this printer's switch really reports |
+| `doorEdgeCount`, `lastDoorOpenMs`, `lastDoorCloseMs` | Edge bookkeeping |
+
+`reportDoorOpen()` (in `printer_parse.h`, wrapped as `printerDoorOpen()` in `state.h`) is
+`doorKnown && doorOpen` and is the **only** door reading the control loop, the thermostat freeze and
+the cooling-rate learner ever use — a printer with a stuck bit therefore behaves exactly as it did
+before the feature existed. **The first report that carries `home_flag` establishes the raw state, is
+not an edge and does not set `doorKnown`**, or every MQTT reconnect would look like someone opening
+the printer.
+
+`printer.doorOpen` is serialised as `null` while `doorKnown` is false, and `printer.doorKnown` says
+which case you are in.
+
 ### Effective modes
 
-`printing = gcode_state ∈ {RUNNING, PAUSE, PREPARE, SLICING}`
+`printing = phase ∈ {preheat, printing, paused}` (see above)
 `stale = age of the newest accepted report ≥ staleSec` (never received counts as infinitely old)
-`cooling = onlyWhilePrinting && !printing && a print has ended && now − printEnd < cooldownMin`
+`recentPrint = !printing && a print has ended && now − printEnd < cooldownMin`
+`cooling = onlyWhilePrinting && recentPrint && chamber > cooldownTarget`
 
 | Order | `effectiveMode` | Condition | Target |
 |---|---|---|---|
 | 1 | `off` | `fan.mode == "off"` | 0 % |
 | 2 | `manual` | `fan.mode == "manual"` | `manualSpeed` |
-| 3 | `stale` | auto and `stale` | `hold` → the current ramp value; `off` → 0 %; `fixed` → `staleSpeed` |
-| 4 | `idle` | auto, `onlyWhilePrinting`, not printing, cooldown finished | 0 % |
-| 5 | `cooldown` | auto, `onlyWhilePrinting`, not printing, cooldown running | curve |
-| 6 | `auto` | otherwise | curve |
+| 3 | `stale` | not off/manual and `stale` | `hold` → the current ramp value; `off` → 0 %; `fixed` → `staleSpeed` |
+| 4 | `door` | `doorMode != ignore`, **`doorKnown`**, the door is open (or closed less than `doorResumeSec` ago), and phase ∉ {`finished`, `cooling`, `idle`} | `off` → 0 %; `fixed` → `doorSpeed` |
+| 5 | `preheat` | `preheatMode != ignore` and phase == `preheat` | `off` → 0 %; `fixed` → `preheatSpeed` |
+| 6 | `idle` | `mode == chamber`, chamber known, and the phase has no set point | 0 % |
+| 7 | `cooldown` | `mode == chamber`, phase ∈ {`finished`, `cooling`} or (`idle` and `recentPrint`) | thermostat towards `cooldownTarget` |
+| 8 | `chamber` | `mode == chamber`, phase ∈ {`preheat`, `printing`, `paused`} | thermostat towards `chamberTarget` |
+| 9 | `idle` | `onlyWhilePrinting`, not printing, cool-down finished | 0 % |
+| 10 | `cooldown` | `onlyWhilePrinting`, not printing, cool-down running | curve |
+| 11 | `auto` | otherwise (including `mode == chamber` with an unknown chamber temperature) | curve |
 
 Note that staleness is judged **by data age only**, not by the MQTT socket state, so a brief
 reconnect does not yank the fan to the failsafe while the last reading is seconds old.
+
+During a cool-down an open door is *helping*, which is why rule 4 skips the `finished`, `cooling` and
+`idle` phases. And in `auto` mode the cool-down window now ends at `cooldownTarget` **or**
+`cooldownMin`, whichever comes first, so the fan does not run out a ten-minute timer on a chamber
+that is already cold.
+
+### Chamber thermostat
+
+`thermostatStep()` in `thermostat.h` is a pure, Arduino-free PI step (host-tested in
+`test/test_thermostat`):
+
+```
+e   = chamber − setpoint                       // positive = too hot, fan should run
+out = clamp(kp·e + ki·∫e, 0, 100)
+```
+
+Two guards keep the integral from running away, which for an exhaust fan is the difference between
+"settles at 45 °C" and "sits at 100 % for ten minutes after the door was shut":
+
+* a hard clamp at ±`100/ki`, so `ki·∫e` alone can never demand more than full scale either way;
+* **conditional integration** — integration is frozen while the door is open (the error is real but
+  the fan cannot fix it) and whenever a step would push an already saturated output further into its
+  rail. Steps that bring a saturated output back into range are always accepted, so the integral can
+  always unwind.
+
+The controller steps once every `thermostatPeriodSec`; between steps the last output is held. Any
+change of set point (print → cool-down) resets the integral, and so does leaving the thermostat for
+any other effective mode, so returning from a door event never resumes with a stale integral.
+
+### Cooling-rate learning
+
+`thermal.h/.cpp` samples the chamber every 5 s and never touches the fan. A **window** is a run of
+≥ 60 s in which the fan output stayed within ±5 %, the door state did not change, and no heater was
+active (`bedTarget == 0 && nozzleTarget == 0`). For each usable window it fits Newton's law of
+cooling
+
+```
+dT/dt = −k · (T − ambientTemp)        →        k = −(dT/dt) / (T − ambientTemp)      [1/min]
+```
+
+and blends `k` into `thermal.k[bucket][door]` with an EMA (α = 0.3), bucketing by nearest fan output
+(0/25/50/75/100 %) and by door state. A window is refused when the chamber moved less than 0.5 °C,
+when it sits less than 3 °C above ambient (dividing by `T − ambient` would amplify sensor noise into
+nonsense), or when the chamber was warming rather than cooling. Windows are harvested as soon as they
+are long enough and then restarted, so a long cool-down contributes a run of samples rather than one
+average. The learned table is persisted through the existing dirty/loop-save mechanism at most once
+every **10 minutes**. The arithmetic lives in `thermal_math.h` and is host-tested in
+`test/test_thermal`.
 
 ### Order of operations
 
@@ -263,6 +383,8 @@ reconnect does not yank the fan to the failsafe while the last reading is second
 sourceTemp = select(fan.source, printer temps)        // NaN when unavailable
              nozzle | bed | chamber | max(nozzle,bed,chamber ignoring NaN)
 
+0. rules       off / manual / stale / door / preheat / thermostat, in the order above; the
+               steps below apply to whatever target that produced
 1. curve       target = curveInterpolate(curve, sourceTemp)      (auto/cooldown only)
 2. hysteresis  the curve is only re-evaluated once |sourceTemp − heldTemp| >= hysteresis;
                a NaN source resets the anchor and yields 0 %
@@ -280,14 +402,15 @@ sourceTemp = select(fan.source, printer temps)        // NaN when unavailable
 The ramp accumulator is kept **separate from the published output**: if the min-speed clamp fed back
 into the slew, a fan with `minSpeed` set could never climb away from 0 %.
 
-`FanState` publishes `output`, `target`, `effectiveMode`, `sourceTemp`, `pwmDuty`,
-`manualExpiresAt` and `kicking`. **`pwmDuty` is post-inversion** — it is the byte the pin actually
+`FanState` publishes `output`, `target`, `effectiveMode`, `sourceTemp`, `setpoint`, `pwmDuty`,
+`manualExpiresAt` and `kicking`. `setpoint` is the thermostat set point in force this instant and is
+NaN (JSON `null`) in every other mode. **`pwmDuty` is post-inversion** — it is the byte the pin actually
 sees, so with `pwmInvert` an output of 0 % reports 255.
 
 ### Manual overrides
 
 `fanApplyMode(mode, speed, durationSec, persist)` is shared by `POST /api/fan` and the MQTT command
-topics. `durationSec` is clamped to 86400. A **timed** override sets a deadline and is *not*
+topics; it accepts `auto`, `chamber`, `manual` and `off`. `durationSec` is clamped to 86400. A **timed** override sets a deadline and is *not*
 persisted (so a reboot ends it); a duration of 0 persists mode and speed through the deferred-save
 path. When the deadline passes, the control loop logs it, clears the deadline and writes
 `fan.mode = "auto"` back into the config.
@@ -337,7 +460,8 @@ them would blank out good data. A message that survives filtering updates `lastU
 | `fan_gear` | Parsed by the filter but **deliberately not used**: on a live X1C it read `0x6400` while `big_fan1_speed` was `"6"` (40 %) |
 | `device.airduct.parts[]` | Each part's `state` is already a percentage; indices 0/1/2 map to part/aux/chamber (H2D) |
 | `home_flag` | Arrives as a negative int32; read as `uint32_t`, **bit 23 = door open** |
-| `stg_cur` | Mapped through the ha-bambulab stage table (`0 = printing`, `2 = heatbed_preheating`, …, `-1`/`255` = `idle`) |
+| `stg_cur` | Mapped through the full ha-bambulab stage table `0..77` in `stageName()` (`0 = printing`, `2 = heatbed_preheating`, `49 = heating_chamber`, `50 = heatbed_cooling`, …), plus `-1`/`255` = `idle` and `-2` = `offline`. Codes 36+ are H2D-era and best-effort |
+| `device.ctc.info.temp` high word | Chamber **target**; `0` means "this printer has no chamber heater", so it becomes `NaN` (JSON `null`) rather than a target of 0 °C |
 | Unknown values | Temperatures stay `NaN`, fan speeds `-1`, counters `-1`; the status document turns all of those into JSON `null` |
 
 `printer.online` is `connected && data age < staleSec`.
@@ -551,13 +675,18 @@ retained to `<base>/state`.
   "printer": { "configured":true, "connected":true, "online":true, "lastUpdateSec":2,
                "mqttState":0, "mqttStateText":"connected", "state":"RUNNING", "printing":true,
                "stage":0, "stageText":"printing", "progress":42, "remainingMin":87,
-               "layer":12, "totalLayers":210, "task":"Benchy.3mf", "doorOpen":false,
+               "layer":12, "totalLayers":210, "task":"Benchy.3mf", "phase":"printing",
+               "doorOpen":false, "doorEdgeCount":2,
                "printError":0, "wifiSignal":"-45dBm",
-               "temps": { "nozzle":220.4, "nozzleTarget":220, "bed":60.1, "bedTarget":60, "chamber":38.0 },
+               "temps": { "nozzle":220.4, "nozzleTarget":220, "bed":60.1, "bedTarget":60,
+                          "chamber":38.0, "chamberTarget":45.0 },
                "fans":  { "part":100, "aux":0, "chamber":40, "heatbreak":100 } },
   "fan":     { "output":55, "target":55, "mode":"auto", "effectiveMode":"auto", "source":"nozzle",
-               "sourceTemp":220.4, "manualSpeed":50, "manualExpiresSec":0, "pwmDuty":140,
+               "sourceTemp":220.4, "setpoint":null, "chamberTarget":45, "cooldownTarget":35,
+               "manualSpeed":50, "manualExpiresSec":0, "pwmDuty":140,
                "output1":true, "output2":true },
+  "thermal": { "rateCPerMin":-0.42, "kClosed":[0.31,null,null,null,null],
+               "kOpen":[null,null,null,null,null], "samples":7 },
   "mqttExt": { "enabled":true, "connected":true }
 }
 ```
@@ -571,15 +700,27 @@ retained to `<base>/state`.
 | `printer.configured` | IP, access code and serial are all set |
 | `printer.connected` | MQTT session up · `printer.online` | session up **and** data younger than `staleSec` |
 | `printer.mqttState` / `mqttStateText` | PubSubClient state code and its text (`connected`, `unauthorized`, `bad_credentials`, `connection_lost`, …) |
-| `printer.state` | Raw `gcode_state`; `printer.printing` is true for `RUNNING`/`PAUSE`/`PREPARE`/`SLICING` |
+| `printer.state` | Raw `gcode_state` |
+| `printer.phase` | Derived phase: `offline｜paused｜preheat｜cooling｜printing｜finished｜failed｜idle` (see [Print phase](#print-phase)). `printer.printing` is true for `preheat`/`printing`/`paused` |
 | `printer.stageText` | ha-bambulab stage name for `stg_cur` |
+| `printer.doorOpen` | Front-door switch — `true`/`false`, or **`null`** while `doorKnown` is false. The top lid has no sensor |
+| `printer.doorKnown` | An open/close edge has been observed, so the bit can be trusted. Everything door-driven is inert until then |
+| `printer.doorEdgeCount` | Transitions seen since boot; the first report is state, not an edge |
+| `printer.temps.chamberTarget` | The printer's own chamber set point, `null` on machines without a chamber heater |
 | `fan.output` / `target` | Rounded percent actually driven / requested by the active mode |
-| `fan.effectiveMode` | `off｜manual｜stale｜idle｜cooldown｜auto` |
+| `fan.effectiveMode` | `off｜manual｜stale｜door｜preheat｜idle｜cooldown｜chamber｜auto` |
+| `fan.setpoint` | Thermostat set point in force right now, `null` outside `chamber`/`cooldown` |
+| `fan.chamberTarget` / `cooldownTarget` | The **configured** set points, so the HA number entities have a state to read back |
+| `thermal.rateCPerMin` | Current chamber slope in °C/min (negative = cooling), `null` until the fan output and door have been steady for ~20 s |
+| `thermal.kClosed` / `kOpen` | Learned cooling constants in 1/min for fan buckets 0/25/50/75/100 %; `null` where nothing has been measured — **never** NaN |
+| `thermal.samples` | Number of windows blended into the table so far |
 | `fan.manualExpiresSec` | Seconds left on a timed override, `0` when there is none |
 | `fan.pwmDuty` | The 0–255 byte written to the pin, **already inverted** when `pwmInvert` is on |
 | `mqttExt` | External broker: configured-and-enabled, and currently connected |
 
-**Null rules.** Unknown temperatures are `null`. `printer.stage`, `progress`, `remainingMin`,
+**Null rules.** Unknown temperatures are `null`, and so is every unmeasured entry in `thermal`
+(NaN must never reach the JSON — `serializeJson` would emit a bare `null` for a float NaN, but the
+status builder makes it explicit). `printer.stage`, `progress`, `remainingMin`,
 `layer` and `totalLayers` are `null` until the printer reports them — never `-1` or `0`. Printer fan
 percentages are `null` when unknown. `printer.lastUpdateSec` is `null` until the very first report
 ever arrives (the UI renders that as "never").
@@ -599,12 +740,19 @@ DNS timeout cannot stall the loop.
 | `<base>/state` | pub, retained | The full status object |
 | `<base>/fan/speed` | pub, retained | `0`–`100` (current output) |
 | `<base>/fan/on_state` | pub, retained | `ON` when output > 0, else `OFF` |
-| `<base>/mode` | pub, retained | `auto` / `manual` / `off` (the configured mode) |
+| `<base>/mode` | pub, retained | `auto` / `chamber` / `manual` / `off` (the configured mode) |
 | `<base>/fan/set` | sub | `0`–`100` → manual mode at that speed |
 | `<base>/fan/on` | sub | `OFF` → mode `off`; anything else → manual (at least 1 %) |
-| `<base>/mode/set` | sub | `auto` / `manual` / `off` |
+| `<base>/mode/set` | sub | `auto` / `chamber` / `manual` / `off` |
 | `<base>/curve/set` | sub | `{"points":[{"temp":…,"speed":…},…]}`, max 2048 bytes, saved inline |
+| `<base>/chamber_target/set` | sub | `20`–`80` → `fan.chamberTarget` (clamped by `validate()`) |
+| `<base>/cooldown_target/set` | sub | `15`–`60` → `fan.cooldownTarget` |
+| `<base>/target/set` | sub | `{"chamberTarget":45,"cooldownTarget":35}` — either key may be omitted |
 | `<base>/restart` | sub | Any payload → restart |
+
+The set points come in two shapes because a Home Assistant `number` entity wants one topic per
+value, while a script would rather send both at once. Both go through the deferred-save path, so an
+HA slider cannot wear the flash out.
 
 `state`, `fan/speed`, `fan/on_state` and `mode` are republished every `publishIntervalSec`,
 immediately whenever the fan output changes, and right after a command is applied. The client buffer
@@ -628,22 +776,25 @@ Discovery topic: `<haPrefix>/<component>/blsmartflow_<chipid>/<object_id>/config
 | Component | `object_id` | Notes |
 |---|---|---|
 | `fan` | `fan` | `command_topic fan/on`, `state_topic fan/on_state`, `percentage_command_topic fan/set`, `percentage_state_topic fan/speed`, speed range 1–100 |
-| `select` | `mode` | Options `auto`, `manual`, `off` |
+| `select` | `mode` | Options `auto`, `chamber`, `manual`, `off` |
+| `number` | `chamber_target` | 20–80 °C, `command_topic chamber_target/set`, state from `value_json.fan.chamberTarget` |
+| `number` | `cooldown_target` | 15–60 °C, `command_topic cooldown_target/set`, state from `value_json.fan.cooldownTarget` |
 | `button` | `restart` | `payload_press: PRESS`, `device_class: restart` |
 | `sensor` | `nozzle_temp`, `bed_temp`, `chamber_temp` | °C, `device_class temperature`, `state_class measurement` |
 | `sensor` | `fan_output` | %, `state_class measurement` |
-| `sensor` | `printer_state`, `printer_stage` | Text |
+| `sensor` | `printer_state`, `printer_stage`, `phase` | Text. `phase` is the derived print phase the fan rules act on |
+| `sensor` | `cooling_rate` | °C/min, `state_class measurement`; `unknown` while nothing is being measured |
 | `sensor` | `print_progress` | %, `state_class measurement` |
 | `sensor` | `remaining_time` | min, `device_class duration` |
 | `sensor` | `printer_wifi` | The printer's own reported RSSI string |
 | `sensor` | `device_rssi` | dBm, `device_class signal_strength` |
 | `sensor` | `uptime` | s, `device_class duration`, `state_class total_increasing` |
 | `binary_sensor` | `printer_online` | `device_class connectivity` |
-| `binary_sensor` | `door` | `device_class opening` |
+| `binary_sensor` | `door` | `device_class opening`. Publishes the literal `None` while `doorKnown` is false, which Home Assistant renders as *Unknown* — a stuck bit must not be reported as a shut door |
 | `binary_sensor` | `printing` | `device_class running` |
 
 Every sensor reads its value out of the retained `state` document with a `value_template`. Fields
-that can be `null` (the three temperatures, progress, remaining time) use
+that can be `null` (the three temperatures, progress, remaining time, cooling rate) use
 `{% set v = value_json.… %}{{ 'unknown' if v is none else v }}` so Home Assistant shows *Unknown*
 instead of logging a parse error on an empty string.
 
@@ -816,13 +967,15 @@ It then rewrites `firmware/manifest.json`: `version` from `custom_version`, and
 
 ### Tests
 
-`pio test -e native` runs three Unity suites against the Arduino-free headers:
+`pio test -e native` runs five Unity suites against the Arduino-free headers:
 
 | Suite | Covers |
 |---|---|
 | `test/test_curve` | `curve.h`: interpolation at / between / outside points, equal temperatures, unsorted input, clamping, `curveValidate()` rules |
-| `test/test_parse` | `printer_parse.h` against the captured fixtures |
+| `test/test_parse` | `printer_parse.h` against the captured fixtures, plus door-edge semantics, the packed chamber target, every `reportPhase()` rule and the `stg_cur` name table |
 | `test/test_buffer` | `AutoGrowBufferStream` (with local `Arduino.h` / `Stream.h` shims) |
+| `test/test_thermostat` | `thermostat.h`: proportional response, integral accumulation, the ±100/ki anti-windup clamp, the door and saturation freezes, and the printing → cool-down set-point switch |
+| `test/test_thermal` | `thermal_math.h`: bucketing, the EMA blend, recovering a known cooling constant from a synthetic cool-down, and every reason a window is refused |
 
 Fixtures in `test/fixtures/` were captured from a live X1C and sanitised:
 `x1c_push_status.json` (a full `print.push_status`, notably **without** `chamber_temper`, with packed
@@ -841,6 +994,17 @@ fan controller, so `src/www/index.html` can be developed without hardware.
 | `--ap` | Simulate AP / provisioning mode (`device.apMode = true`, no station) |
 | `--offline` | The printer never connects: temps and counters `null`, `lastUpdateSec` `null`, `effectiveMode` `stale` |
 | `--auth USER:PASS` | Require HTTP basic auth on every route, as `web.authEnabled` does |
+| `--door` | Start with the door reported open (`doorKnown` still false until the first toggle) |
+
+The simulated printer walks a whole job — idle → preheat → printing → finished/cooling → idle —
+driving `stg_cur`, the temperature targets and therefore `printer.phase`, and it runs a Newtonian
+chamber model (`dT/dt = heatIn − k·(T − ambient)`, with `k` raised by the fan output and by an open
+door) so the thermostat and the cooling-rate learning have something real to chew on. It implements
+the same evaluation order, the same PI step and the same window logic as the firmware.
+
+`POST /mock/door` is the one route that is **not** part of the device API: `{"open":true}`,
+`{"open":false}` or `{"toggle":true}` stands in for someone opening the printer, so the door rules
+can be demonstrated. It answers `{"ok":true,"changed":…,"doorOpen":…,"doorEdgeCount":…}`.
 
 ### CI
 
@@ -921,3 +1085,15 @@ solid = OK. A blink pattern is *N* × 200 ms on/off followed by an 800 ms gap.
   pieces.
 * **`fan.mode` is persisted**, so a device that was left in `manual` comes back in `manual` after a
   power cut; timed overrides deliberately do not survive a reboot.
+* **The door bit is best effort, and the top lid is not sensed at all.** On some X1C units the closed
+  door never actuates the switch, so `home_flag` bit 23 stays at 1 for the whole session. Those
+  machines never reach `doorKnown`, so `printer.doorOpen` stays `null`, `doorEdgeCount` stays 0 and
+  every door rule stays inert — which is the intended failure mode, not a bug.
+* **The thermostat's integral freeze uses the same door reading**, so on a printer with an unproven
+  switch it never freezes — the ±100/ki clamp and the saturation freeze are what protect it there.
+* **Chamber thermostat mode needs a chamber temperature.** On a printer that reports none it falls
+  back to the curve (`effectiveMode: "auto"`) rather than running blind.
+* **The cooling-rate table is descriptive, not prescriptive.** Nothing auto-tunes `kp`/`ki` from it;
+  it exists so the UI and Home Assistant can say how fast the chamber actually cools.
+* **`fan.ambientTemp` is a typed-in number, not a measurement.** The device has no room sensor, so a
+  wrong value shifts every learned `k` even though the fan behaviour is unaffected.

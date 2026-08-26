@@ -182,6 +182,23 @@ void configDefaults(Config& c)
     strlcpy(c.fan.staleMode, "off", sizeof(c.fan.staleMode));
     c.fan.staleSpeed = 0;
 
+    // Thermal states default to "do nothing different", so an upgrade from 2.0.0
+    // behaves exactly as it did before the user opts in.
+    strlcpy(c.fan.doorMode, "ignore", sizeof(c.fan.doorMode));
+    c.fan.doorSpeed = 0;
+    c.fan.doorResumeSec = 5;
+    strlcpy(c.fan.preheatMode, "off", sizeof(c.fan.preheatMode));
+    c.fan.preheatSpeed = 0;
+    c.fan.chamberTarget = 45;
+    c.fan.cooldownTarget = 35;
+    c.fan.kp = 8.0f;
+    c.fan.ki = 0.02f;
+    c.fan.thermostatPeriodSec = 5;
+    c.fan.ambientTemp = 25;
+
+    for (uint8_t i = 0; i < 5; i++) c.thermal.kClosed[i] = c.thermal.kOpen[i] = NAN;
+    c.thermal.samples = 0;
+
     c.mqtt.enabled = false;
     c.mqtt.port = 1883;
     c.mqtt.haDiscovery = true;
@@ -237,10 +254,13 @@ void configValidate(Config& c)
     }
     static const char* kSources[] = {"nozzle", "bed", "chamber", "max"};
     clampEnum(c.fan.source, sizeof(c.fan.source), kSources, 4, "nozzle");
-    static const char* kModes[] = {"auto", "manual", "off"};
-    clampEnum(c.fan.mode, sizeof(c.fan.mode), kModes, 3, "auto");
+    static const char* kModes[] = {"auto", "manual", "off", "chamber"};
+    clampEnum(c.fan.mode, sizeof(c.fan.mode), kModes, 4, "auto");
     static const char* kStale[] = {"hold", "off", "fixed"};
     clampEnum(c.fan.staleMode, sizeof(c.fan.staleMode), kStale, 3, "off");
+    static const char* kRule[] = {"ignore", "off", "fixed"};
+    clampEnum(c.fan.doorMode, sizeof(c.fan.doorMode), kRule, 3, "ignore");
+    clampEnum(c.fan.preheatMode, sizeof(c.fan.preheatMode), kRule, 3, "off");
 
     c.fan.manualSpeed = clampVal<uint8_t>(c.fan.manualSpeed, 0, 100);
     c.fan.minSpeed = clampVal<uint8_t>(c.fan.minSpeed, 0, 100);
@@ -253,6 +273,30 @@ void configValidate(Config& c)
     c.fan.cooldownMin = clampVal<uint16_t>(c.fan.cooldownMin, 0, 1440);
     // A stale window shorter than a couple of report intervals would flap.
     c.fan.staleSec = clampVal<uint16_t>(c.fan.staleSec, 10, 3600);
+
+    // --- thermal states ---
+    c.fan.doorSpeed = clampVal<uint8_t>(c.fan.doorSpeed, 0, 100);
+    c.fan.preheatSpeed = clampVal<uint8_t>(c.fan.preheatSpeed, 0, 100);
+    c.fan.doorResumeSec = clampVal<uint16_t>(c.fan.doorResumeSec, 0, 300);
+    c.fan.chamberTarget = clampVal<uint8_t>(c.fan.chamberTarget, 20, 80);
+    c.fan.cooldownTarget = clampVal<uint8_t>(c.fan.cooldownTarget, 15, 60);
+    if (isnan(c.fan.kp) || c.fan.kp < 0.0f) c.fan.kp = 0.0f;
+    if (c.fan.kp > 50.0f) c.fan.kp = 50.0f;
+    if (isnan(c.fan.ki) || c.fan.ki < 0.0f) c.fan.ki = 0.0f;
+    if (c.fan.ki > 1.0f) c.fan.ki = 1.0f;
+    c.fan.thermostatPeriodSec = clampVal<uint8_t>(c.fan.thermostatPeriodSec, 1, 60);
+    c.fan.ambientTemp = clampVal<uint8_t>(c.fan.ambientTemp, 0, 40);
+
+    // --- learned cooling constants ---
+    // Only NaN ("never measured") and a physically plausible 1/min are kept; a
+    // hand-edited or corrupted value would otherwise be shown as fact.
+    for (uint8_t i = 0; i < 5; i++) {
+        float* k[2] = {&c.thermal.kClosed[i], &c.thermal.kOpen[i]};
+        for (float* v : k) {
+            if (isnan(*v)) continue;
+            if (isinf(*v) || *v <= 0.0f || *v > 5.0f) *v = NAN;
+        }
+    }
 
     // --- mqtt ---
     if (c.mqtt.port == 0) c.mqtt.port = 1883;
@@ -339,6 +383,30 @@ void applyDocument(JsonObjectConst root, Config& c)
         c.fan.cooldownMin       = f["cooldownMin"]       | c.fan.cooldownMin;
         c.fan.staleSec          = f["staleSec"]          | c.fan.staleSec;
         c.fan.staleSpeed        = f["staleSpeed"]        | c.fan.staleSpeed;
+        copyIfString(f, "doorMode",    c.fan.doorMode,    sizeof(c.fan.doorMode));
+        copyIfString(f, "preheatMode", c.fan.preheatMode, sizeof(c.fan.preheatMode));
+        c.fan.doorSpeed            = f["doorSpeed"]            | c.fan.doorSpeed;
+        c.fan.doorResumeSec        = f["doorResumeSec"]        | c.fan.doorResumeSec;
+        c.fan.preheatSpeed         = f["preheatSpeed"]         | c.fan.preheatSpeed;
+        c.fan.chamberTarget        = f["chamberTarget"]        | c.fan.chamberTarget;
+        c.fan.cooldownTarget       = f["cooldownTarget"]       | c.fan.cooldownTarget;
+        c.fan.kp                   = f["kp"]                   | c.fan.kp;
+        c.fan.ki                   = f["ki"]                   | c.fan.ki;
+        c.fan.thermostatPeriodSec  = f["thermostatPeriodSec"]  | c.fan.thermostatPeriodSec;
+        c.fan.ambientTemp          = f["ambientTemp"]          | c.fan.ambientTemp;
+    }
+    JsonObjectConst th = root["thermal"];
+    if (!th.isNull()) {
+        // Ten floats, closed buckets first. A never-measured bucket is serialised
+        // as JSON null, which `| NAN` turns back into "unknown".
+        JsonArrayConst k = th["k"];
+        if (!k.isNull()) {
+            for (uint8_t i = 0; i < 5; i++) {
+                c.thermal.kClosed[i] = k[i] | NAN;
+                c.thermal.kOpen[i] = k[i + 5] | NAN;
+            }
+        }
+        c.thermal.samples = th["samples"] | c.thermal.samples;
     }
     JsonObjectConst m = root["mqtt"];
     if (!m.isNull()) {
@@ -521,6 +589,17 @@ void configToJson(JsonObject out, const Config& c, bool masked)
     f["staleSec"] = c.fan.staleSec;
     f["staleMode"] = String(c.fan.staleMode);
     f["staleSpeed"] = c.fan.staleSpeed;
+    f["doorMode"] = String(c.fan.doorMode);
+    f["doorSpeed"] = c.fan.doorSpeed;
+    f["doorResumeSec"] = c.fan.doorResumeSec;
+    f["preheatMode"] = String(c.fan.preheatMode);
+    f["preheatSpeed"] = c.fan.preheatSpeed;
+    f["chamberTarget"] = c.fan.chamberTarget;
+    f["cooldownTarget"] = c.fan.cooldownTarget;
+    f["kp"] = c.fan.kp;
+    f["ki"] = c.fan.ki;
+    f["thermostatPeriodSec"] = c.fan.thermostatPeriodSec;
+    f["ambientTemp"] = c.fan.ambientTemp;
 
     JsonObject m = out["mqtt"].to<JsonObject>();
     m["enabled"] = c.mqtt.enabled;
@@ -539,11 +618,19 @@ void configToJson(JsonObject out, const Config& c, bool masked)
     wb["password"] = (masked && c.web.password[0]) ? String(kMask) : String(c.web.password);
 
     JsonObject d = out["debug"].to<JsonObject>();
-    d["serial"] = String(c.debug.serial);
+    d["serial"] = c.debug.serial;
     d["mqttDump"] = c.debug.mqttDump;
 
     JsonObject s = out["ssdp"].to<JsonObject>();
     s["enabled"] = c.ssdp.enabled;
+
+    JsonObject th = out["thermal"].to<JsonObject>();
+    JsonArray k = th["k"].to<JsonArray>();
+    // ArduinoJson serialises NaN as null, which is exactly what "never measured"
+    // should look like both in the file and in GET /api/config.
+    for (uint8_t i = 0; i < 5; i++) k.add(c.thermal.kClosed[i]);
+    for (uint8_t i = 0; i < 5; i++) k.add(c.thermal.kOpen[i]);
+    th["samples"] = c.thermal.samples;
 }
 
 void configFromJson(JsonObjectConst in, Config& c, ConfigChange& change)
@@ -590,6 +677,17 @@ void configFromJson(JsonObjectConst in, Config& c, ConfigChange& change)
         ch |= mergeNum<uint16_t>(f, "cooldownMin", c.fan.cooldownMin);
         ch |= mergeNum<uint16_t>(f, "staleSec", c.fan.staleSec);
         ch |= mergeNum<uint8_t>(f, "staleSpeed", c.fan.staleSpeed);
+        ch |= mergeStr(f, "doorMode", c.fan.doorMode, sizeof(c.fan.doorMode));
+        ch |= mergeStr(f, "preheatMode", c.fan.preheatMode, sizeof(c.fan.preheatMode));
+        ch |= mergeNum<uint8_t>(f, "doorSpeed", c.fan.doorSpeed);
+        ch |= mergeNum<uint16_t>(f, "doorResumeSec", c.fan.doorResumeSec);
+        ch |= mergeNum<uint8_t>(f, "preheatSpeed", c.fan.preheatSpeed);
+        ch |= mergeNum<uint8_t>(f, "chamberTarget", c.fan.chamberTarget);
+        ch |= mergeNum<uint8_t>(f, "cooldownTarget", c.fan.cooldownTarget);
+        ch |= mergeNum<float>(f, "kp", c.fan.kp);
+        ch |= mergeNum<float>(f, "ki", c.fan.ki);
+        ch |= mergeNum<uint8_t>(f, "thermostatPeriodSec", c.fan.thermostatPeriodSec);
+        ch |= mergeNum<uint8_t>(f, "ambientTemp", c.fan.ambientTemp);
         if (ch) change.fanChanged = true;
     }
 
@@ -626,6 +724,20 @@ void configFromJson(JsonObjectConst in, Config& c, ConfigChange& change)
     JsonObjectConst s = in["ssdp"];
     if (!s.isNull()) {
         if (mergeBool(s, "enabled", c.ssdp.enabled)) change.ssdpChanged = true;
+    }
+
+    // Learned, not configured - but a backup carries it, so a restore must not
+    // throw the measurements away.
+    JsonObjectConst th = in["thermal"];
+    if (!th.isNull()) {
+        JsonArrayConst k = th["k"];
+        if (!k.isNull()) {
+            for (uint8_t i = 0; i < 5; i++) {
+                c.thermal.kClosed[i] = k[i] | NAN;
+                c.thermal.kOpen[i] = k[i + 5] | NAN;
+            }
+        }
+        c.thermal.samples = th["samples"] | c.thermal.samples;
     }
 
     configValidate(c);

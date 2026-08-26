@@ -85,7 +85,8 @@ void parseReport(const char* payload, size_t len, const LinkCfg& lc)
     // Read-modify-write: a report only carries the fields that changed, so the
     // previous snapshot is the starting point.
     PrinterState s = printerBegin();
-    if (!parsePrinterReport(doc.as<JsonVariantConst>(), s)) return;
+    // millis() timestamps the door edges, which fan_control's resume delay needs.
+    if (!parsePrinterReport(doc.as<JsonVariantConst>(), s, millis())) return;
 
     if (lc.dump) {
         Serial.print(F("[mqtt] "));

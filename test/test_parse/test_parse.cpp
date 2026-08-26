@@ -239,6 +239,251 @@ static void test_is_printing_states(void)
     }
 }
 
+// --- REWORK-SPEC 15.1: door edges, chamber target, phase, stage names -------
+
+static PrinterReport blank()
+{
+    PrinterReport r;
+    printerReportInit(r);
+    return r;
+}
+
+// Builds a minimal report document around the given "print" body.
+static bool feed(const char* printBody, PrinterReport& r, uint32_t nowMs = 0)
+{
+    JsonDocument doc;
+    std::string json = std::string("{\"print\":") + printBody + "}";
+    DeserializationError err = deserializeJson(doc, json.c_str(), json.size());
+    TEST_ASSERT_FALSE_MESSAGE(err, err.c_str());
+    return parsePrinterReport(doc.as<JsonVariantConst>(), r, nowMs);
+}
+
+static void test_door_first_report_is_state_not_edge(void)
+{
+    PrinterReport r = blank();
+    TEST_ASSERT_FALSE(r.doorRawSeen);
+    TEST_ASSERT_FALSE(r.doorKnown);
+    // home_flag with bit 23 set: the raw bit says open, but nobody just opened
+    // anything - and on some X1C units this bit is simply stuck there.
+    TEST_ASSERT_TRUE(feed("{\"home_flag\":8388608}", r, 1000));
+    TEST_ASSERT_TRUE(r.doorRawSeen);
+    TEST_ASSERT_FALSE_MESSAGE(r.doorKnown, "the first report is not an edge");
+    TEST_ASSERT_TRUE(r.doorOpen);                    // the raw bit is recorded
+    TEST_ASSERT_FALSE_MESSAGE(reportDoorOpen(r), "an unproven switch must read closed");
+    TEST_ASSERT_EQUAL_UINT16(0, r.doorEdgeCount);
+    TEST_ASSERT_EQUAL_UINT32(0, r.lastDoorOpenMs);
+    TEST_ASSERT_EQUAL_UINT32(0, r.lastDoorCloseMs);
+}
+
+static void test_door_stuck_open_never_becomes_known(void)
+{
+    // Eric's X1C: the closed door does not actuate the switch, so bit 23 reads 1
+    // for the whole print. Without the edge rule the fan would sit under the
+    // door rule from boot to power-off.
+    PrinterReport r = blank();
+    for (uint32_t t = 1000; t <= 60000; t += 1000) feed("{\"home_flag\":8388615}", r, t);
+    TEST_ASSERT_TRUE(r.doorOpen);
+    TEST_ASSERT_FALSE(r.doorKnown);
+    TEST_ASSERT_FALSE(reportDoorOpen(r));
+    TEST_ASSERT_EQUAL_UINT16(0, r.doorEdgeCount);
+
+    // Pressing the switch by hand produces the first edge; from then on the bit
+    // is trustworthy in both directions.
+    feed("{\"home_flag\":7}", r, 61000);
+    TEST_ASSERT_TRUE(r.doorKnown);
+    TEST_ASSERT_FALSE(r.doorOpen);
+    TEST_ASSERT_FALSE(reportDoorOpen(r));
+    TEST_ASSERT_EQUAL_UINT16(1, r.doorEdgeCount);
+    TEST_ASSERT_EQUAL_UINT32(61000, r.lastDoorCloseMs);
+
+    feed("{\"home_flag\":8388615}", r, 62000);
+    TEST_ASSERT_TRUE(reportDoorOpen(r));
+}
+
+static void test_door_edges_are_counted_and_timestamped(void)
+{
+    PrinterReport r = blank();
+    feed("{\"home_flag\":0}", r, 1000);            // first sighting: closed
+    TEST_ASSERT_EQUAL_UINT16(0, r.doorEdgeCount);
+    TEST_ASSERT_FALSE(r.doorKnown);
+
+    feed("{\"home_flag\":0}", r, 2000);            // no change, no edge
+    TEST_ASSERT_EQUAL_UINT16(0, r.doorEdgeCount);
+    TEST_ASSERT_FALSE(r.doorKnown);
+
+    feed("{\"home_flag\":8388608}", r, 3000);      // opened
+    TEST_ASSERT_TRUE(r.doorOpen);
+    TEST_ASSERT_TRUE(r.doorKnown);
+    TEST_ASSERT_TRUE(reportDoorOpen(r));
+    TEST_ASSERT_EQUAL_UINT16(1, r.doorEdgeCount);
+    TEST_ASSERT_EQUAL_UINT32(3000, r.lastDoorOpenMs);
+    TEST_ASSERT_EQUAL_UINT32(0, r.lastDoorCloseMs);
+
+    feed("{\"home_flag\":0}", r, 4500);            // closed again
+    TEST_ASSERT_FALSE(r.doorOpen);
+    TEST_ASSERT_FALSE(reportDoorOpen(r));
+    TEST_ASSERT_EQUAL_UINT16(2, r.doorEdgeCount);
+    TEST_ASSERT_EQUAL_UINT32(3000, r.lastDoorOpenMs);
+    TEST_ASSERT_EQUAL_UINT32(4500, r.lastDoorCloseMs);
+
+    // Other home_flag bits must not disturb the door bookkeeping.
+    feed("{\"home_flag\":7}", r, 5000);
+    TEST_ASSERT_FALSE(r.doorOpen);
+    TEST_ASSERT_EQUAL_UINT16(2, r.doorEdgeCount);
+}
+
+static void test_chamber_target_from_packed_high_word(void)
+{
+    PrinterReport r = blank();
+    // 45 current, 50 target -> (50 << 16) | 45
+    feed("{\"device\":{\"ctc\":{\"info\":{\"temp\":3276845}}}}", r);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 45.0f, r.chamber);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 50.0f, r.chamberTarget);
+
+    // A printer with no chamber heater reports a zero high word, which is "no
+    // target", not "target 0 degC".
+    PrinterReport q = blank();
+    feed("{\"device\":{\"ctc\":{\"info\":{\"temp\":43}}}}", q);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 43.0f, q.chamber);
+    TEST_ASSERT_TRUE(isnan(q.chamberTarget));
+}
+
+static void test_phase_offline_rule(void)
+{
+    PrinterReport r = blank();
+    TEST_ASSERT_EQUAL_INT((int)Phase::Offline, (int)reportPhase(r));          // nothing said yet
+    blsf::detail::copyStr(r.gcodeState, sizeof(r.gcodeState), "OFFLINE");
+    TEST_ASSERT_EQUAL_INT((int)Phase::Offline, (int)reportPhase(r));
+    blsf::detail::copyStr(r.gcodeState, sizeof(r.gcodeState), "RUNNING");
+    r.stage = -2;
+    TEST_ASSERT_EQUAL_INT((int)Phase::Offline, (int)reportPhase(r));
+}
+
+static void test_phase_paused_rule(void)
+{
+    PrinterReport r = blank();
+    blsf::detail::copyStr(r.gcodeState, sizeof(r.gcodeState), "PAUSE");
+    TEST_ASSERT_EQUAL_INT((int)Phase::Paused, (int)reportPhase(r));
+
+    // Every pause stage wins even while gcode_state still says RUNNING.
+    static const int kPauseStages[] = {5, 6, 16, 17, 20, 21, 23, 26, 27, 28, 30, 32, 33, 34, 35};
+    for (int stage : kPauseStages) {
+        PrinterReport q = blank();
+        blsf::detail::copyStr(q.gcodeState, sizeof(q.gcodeState), "RUNNING");
+        q.stage = stage;
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)Phase::Paused, (int)reportPhase(q), stageName(stage));
+    }
+}
+
+static void test_phase_preheat_rule(void)
+{
+    static const int kPreheatStages[] = {2, 7, 49, 54, 58, 63, 64};
+    for (int stage : kPreheatStages) {
+        PrinterReport q = blank();
+        blsf::detail::copyStr(q.gcodeState, sizeof(q.gcodeState), "RUNNING");
+        q.stage = stage;
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)Phase::Preheat, (int)reportPhase(q), stageName(stage));
+    }
+
+    // RUNNING with a bed still more than 3 degC below target is a preheat.
+    PrinterReport r = blank();
+    blsf::detail::copyStr(r.gcodeState, sizeof(r.gcodeState), "RUNNING");
+    r.stage = 0;
+    r.bed = 40.0f; r.bedTarget = 100.0f;
+    TEST_ASSERT_EQUAL_INT((int)Phase::Preheat, (int)reportPhase(r));
+    r.bed = 98.0f;                                   // within 3 degC -> printing
+    TEST_ASSERT_EQUAL_INT((int)Phase::Printing, (int)reportPhase(r));
+
+    // Same for the chamber, with a 2 degC band.
+    PrinterReport c = blank();
+    blsf::detail::copyStr(c.gcodeState, sizeof(c.gcodeState), "RUNNING");
+    c.stage = 0;
+    c.chamber = 30.0f; c.chamberTarget = 50.0f;
+    TEST_ASSERT_EQUAL_INT((int)Phase::Preheat, (int)reportPhase(c));
+    c.chamber = 49.0f;
+    TEST_ASSERT_EQUAL_INT((int)Phase::Printing, (int)reportPhase(c));
+
+    // An unknown target must never look like a preheat.
+    PrinterReport u = blank();
+    blsf::detail::copyStr(u.gcodeState, sizeof(u.gcodeState), "RUNNING");
+    u.bed = 20.0f;                                   // bedTarget stays NaN
+    TEST_ASSERT_EQUAL_INT((int)Phase::Printing, (int)reportPhase(u));
+}
+
+static void test_phase_cooling_printing_finished_failed_idle(void)
+{
+    static const int kCooling[] = {29, 50, 69};
+    for (int stage : kCooling) {
+        PrinterReport q = blank();
+        blsf::detail::copyStr(q.gcodeState, sizeof(q.gcodeState), "RUNNING");
+        q.stage = stage;
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)Phase::Cooling, (int)reportPhase(q), stageName(stage));
+    }
+    struct { const char* state; Phase phase; } kCases[] = {
+        {"RUNNING", Phase::Printing}, {"PREPARE", Phase::Printing}, {"SLICING", Phase::Printing},
+        {"FINISH", Phase::Finished},  {"FAILED", Phase::Failed},    {"IDLE", Phase::Idle},
+        {"INIT", Phase::Idle},        {"running", Phase::Idle},
+    };
+    for (auto& c : kCases) {
+        PrinterReport q = blank();
+        blsf::detail::copyStr(q.gcodeState, sizeof(q.gcodeState), c.state);
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)c.phase, (int)reportPhase(q), c.state);
+    }
+}
+
+static void test_phase_names_round_trip(void)
+{
+    TEST_ASSERT_EQUAL_STRING("offline",  phaseName(Phase::Offline));
+    TEST_ASSERT_EQUAL_STRING("paused",   phaseName(Phase::Paused));
+    TEST_ASSERT_EQUAL_STRING("preheat",  phaseName(Phase::Preheat));
+    TEST_ASSERT_EQUAL_STRING("cooling",  phaseName(Phase::Cooling));
+    TEST_ASSERT_EQUAL_STRING("printing", phaseName(Phase::Printing));
+    TEST_ASSERT_EQUAL_STRING("finished", phaseName(Phase::Finished));
+    TEST_ASSERT_EQUAL_STRING("failed",   phaseName(Phase::Failed));
+    TEST_ASSERT_EQUAL_STRING("idle",     phaseName(Phase::Idle));
+}
+
+static void test_printing_matches_phase_definition(void)
+{
+    // 15.1: printing == phase in {preheat, printing, paused}.
+    TEST_ASSERT_TRUE(phaseIsPrinting(Phase::Preheat));
+    TEST_ASSERT_TRUE(phaseIsPrinting(Phase::Printing));
+    TEST_ASSERT_TRUE(phaseIsPrinting(Phase::Paused));
+    TEST_ASSERT_FALSE(phaseIsPrinting(Phase::Cooling));
+    TEST_ASSERT_FALSE(phaseIsPrinting(Phase::Finished));
+    TEST_ASSERT_FALSE(phaseIsPrinting(Phase::Failed));
+    TEST_ASSERT_FALSE(phaseIsPrinting(Phase::Idle));
+    TEST_ASSERT_FALSE(phaseIsPrinting(Phase::Offline));
+
+    // A stage-2 preheat counts as printing even before gcode_state moves, which
+    // is the whole point of gating on the phase rather than on gcode_state.
+    PrinterReport r = blank();
+    blsf::detail::copyStr(r.gcodeState, sizeof(r.gcodeState), "IDLE");
+    r.stage = 2;
+    TEST_ASSERT_TRUE(reportIsPrinting(r));
+}
+
+static void test_stage_names(void)
+{
+    TEST_ASSERT_EQUAL_STRING("idle", stageName(-1));
+    TEST_ASSERT_EQUAL_STRING("idle", stageName(255));
+    TEST_ASSERT_EQUAL_STRING("offline", stageName(-2));
+    TEST_ASSERT_EQUAL_STRING("printing", stageName(0));
+    TEST_ASSERT_EQUAL_STRING("heatbed_preheating", stageName(2));
+    TEST_ASSERT_EQUAL_STRING("cooling_chamber", stageName(29));
+    TEST_ASSERT_EQUAL_STRING("heating_chamber", stageName(49));
+    TEST_ASSERT_EQUAL_STRING("heatbed_cooling", stageName(50));
+    TEST_ASSERT_EQUAL_STRING("waiting_for_chamber_temperature", stageName(63));
+    TEST_ASSERT_EQUAL_STRING("preparing_ams", stageName(77));
+    TEST_ASSERT_EQUAL_STRING("unknown", stageName(78));
+    TEST_ASSERT_EQUAL_STRING("unknown", stageName(-3));
+    // Every code in 0..77 must resolve to something other than "unknown".
+    for (int i = 0; i <= 77; i++) {
+        TEST_ASSERT_FALSE_MESSAGE(strcmp(stageName(i), "unknown") == 0,
+                                  ("stage " + std::to_string(i) + " has no name").c_str());
+    }
+}
+
 static void test_filter_skips_bulky_blocks(void)
 {
     // The filter must not admit ams/ipcam/xcam/net; if it did, a 16 KB report
@@ -277,5 +522,16 @@ int main(int, char**)
     RUN_TEST(test_empty_and_malformed_documents);
     RUN_TEST(test_is_printing_states);
     RUN_TEST(test_filter_skips_bulky_blocks);
+    RUN_TEST(test_door_first_report_is_state_not_edge);
+    RUN_TEST(test_door_stuck_open_never_becomes_known);
+    RUN_TEST(test_door_edges_are_counted_and_timestamped);
+    RUN_TEST(test_chamber_target_from_packed_high_word);
+    RUN_TEST(test_phase_offline_rule);
+    RUN_TEST(test_phase_paused_rule);
+    RUN_TEST(test_phase_preheat_rule);
+    RUN_TEST(test_phase_cooling_printing_finished_failed_idle);
+    RUN_TEST(test_phase_names_round_trip);
+    RUN_TEST(test_printing_matches_phase_definition);
+    RUN_TEST(test_stage_names);
     return UNITY_END();
 }

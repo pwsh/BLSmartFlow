@@ -18,6 +18,7 @@
 #include "blflow/serial_provision.h"
 #include "blflow/ssdp.h"
 #include "blflow/state.h"
+#include "blflow/thermal.h"
 #include "blflow/version.h"
 #include "blflow/web_server.h"
 #include "blflow/wifi_manager.h"
@@ -84,6 +85,7 @@ void setup()
 
     indicatorSetup();
     fanControlSetup();
+    thermalSetup();
     serialProvisionSetup();
 
     // Fan control must be live before the network comes up: a printer that is
@@ -101,6 +103,7 @@ void loop()
     // Order matters only in that fan control runs first, so its timing is never
     // pushed around by slower housekeeping.
     fanControlLoop();
+    thermalLoop();
     indicatorLoop();
     wifiLoop();
     serialProvisionLoop();

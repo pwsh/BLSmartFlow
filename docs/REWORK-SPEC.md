@@ -267,3 +267,150 @@ Line-delimited JSON on USB serial. Accepts legacy keys `{ssid, pass, printerip, 
 * `pio test -e native` — Unity tests for `curve.h` (interpolation at/between/outside points, equal temps, unsorted input, min/max clamp, validate rules).
 * `tools/mock_server.py` — implements the whole API in Python (stdlib only) with a simulated printer so the UI can be developed and demoed without hardware.
 * `.github/workflows/build.yml` — `actions/checkout@v7`, `actions/setup-python@v7`, `pip install platformio`, `pio test -e native`, `pio run`, upload `.firmware/*` with `actions/upload-artifact@v7`; on tag → `softprops/action-gh-release@v3`.
+
+## 15. Thermal states: door/lid, print phase, chamber thermostat, cooling-rate learning (2.0.1)
+
+Motivation: an exhaust/chamber fan that follows a temperature curve alone fights the printer during
+warm-up and ignores the single biggest disturbance — an open door. Bambu printers report one door bit
+(`home_flag` bit 23, a plunger/reed switch at the front-door edge; **the top lid has no sensor**) and a print
+stage (`stg_cur`, table below). These become inputs to the control loop.
+
+**Door reliability rule (from BLLED hardware findings, 2026-08-26):** on some X1C units the closed door does not
+actuate the switch, so the bit sits at "open" forever (pressing the switch by hand flips it). Therefore
+`doorKnown` = "a door *edge* has been seen since boot"; while `doorKnown == false` the door is treated as
+**closed** for control purposes, the status reports `doorOpen: null` and the UI shows "Door: not reported"
+with the explanation. Door feed-forward only acts once `doorKnown` is true. Wording everywhere is "door", not "door/lid".
+
+### 15.1 Parser / state additions (`printer_parse.h`, `state.h`)
+* `doorOpen` (existing) plus `doorKnown` (false until the first *edge*), `doorEdgeCount`, `lastDoorOpenMs`, `lastDoorCloseMs`. The
+  first report only establishes the raw state; it is not an edge and does not set `doorKnown`.
+* Full `stg_cur` table (ha-bambulab, 0..77, −1/255 idle, −2 offline) — copy the table from
+  `/home/eric/Documents/repos/BLLEDController/src/blled/stages.h` (`STAGE_NAMES`) into `state.cpp`.
+* `chamberTarget` (°C, from the packed `device.ctc.info.temp` high word when > 0, else NaN).
+* **Phase** (`phase`, derived, pure function `reportPhase(const PrinterReport&)` in `printer_parse.h`):
+  | phase | rule (first match) |
+  |---|---|
+  | `offline` | no report yet / link down |
+  | `paused` | `gcode_state == PAUSE` or stage ∈ {5,6,16,17,20,21,23,26,27,28,30,32,33,34,35} |
+  | `preheat` | stage ∈ {2,7,49,54,58,63,64} or (`RUNNING` and (`bedTarget>0 && bed < bedTarget−3` or `chamberTarget>0 && chamber < chamberTarget−2`)) |
+  | `cooling` | stage ∈ {29,50,69} |
+  | `printing` | `gcode_state ∈ {RUNNING, PREPARE, SLICING}` |
+  | `finished` | `gcode_state == FINISH` (until it becomes IDLE) |
+  | `failed` | `gcode_state == FAILED` |
+  | `idle` | otherwise |
+  `printing` for the existing `onlyWhilePrinting` logic = phase ∈ {preheat, printing, paused}.
+
+### 15.2 Config additions (`fan.*`)
+```jsonc
+"mode": "auto|manual|off|chamber",          // chamber = thermostat on the chamber temperature
+"doorMode": "ignore",   "doorSpeed": 0,      // ignore|off|fixed — output while door/lid is open (auto mode)
+"doorResumeSec": 5,                          // after the door closes, wait this long before resuming (anti-flap)
+"preheatMode": "off",   "preheatSpeed": 0,   // ignore|off|fixed — output during phase == preheat (auto + chamber modes)
+"chamberTarget": 45,                         // °C, thermostat set point while printing (chamber mode)
+"cooldownTarget": 35,                        // °C, after the print: run until the chamber is this cool (chamber mode; also used by auto mode when onlyWhilePrinting: cooldown ends at target OR cooldownMin, whichever first)
+"kp": 8.0, "ki": 0.02,                       // thermostat gains: % per °C, % per °C·s (integral, anti-windup)
+"thermostatPeriodSec": 5,                    // controller update period
+"ambientTemp": 25                            // °C assumed room temperature for the cooling-rate estimate
+```
+Validation: doorSpeed/preheatSpeed 0..100; doorResumeSec 0..300; chamberTarget 20..80; cooldownTarget 15..60;
+kp 0..50; ki 0..1; thermostatPeriodSec 1..60; ambientTemp 0..40.
+
+### 15.3 Control (`fan_control.cpp`) — evaluation order
+1. `off` / `manual` (with expiry) unchanged.
+2. Stale → existing failsafe.
+3. **Door** (`doorMode != ignore`, `doorKnown && doorOpen`, and phase ∉ {finished, cooling, idle}): target = 0 (`off`) or `doorSpeed` (`fixed`); `effectiveMode = "door"`. After the door closes, keep this for `doorResumeSec`. During cool-down phases an open door is *helpful*, so it is ignored there.
+4. **Preheat** (`preheatMode != ignore`, phase == preheat): target = 0 or `preheatSpeed`; `effectiveMode = "preheat"`.
+5. Mode `chamber` (thermostat): every `thermostatPeriodSec`, `e = chamber − setpoint` where setpoint = `chamberTarget` while phase ∈ {preheat, printing, paused} and `cooldownTarget` while phase ∈ {finished, cooling, idle with a print having ended ≤ cooldownMin ago}. `out = kp·e + ki·∫e`, clamped 0..100, integral clamped to ±100/ki (anti-windup) and **frozen while the door is open or the output is saturated**. `effectiveMode = "chamber"` while printing, `"cooldown"` after. When phase is idle and no recent print: target 0 (`"idle"`). If `chamber` is NaN → fall back to the curve (`"auto"`).
+6. Mode `auto` (curve) unchanged, except the cool-down window ends when `chamber ≤ cooldownTarget` **or** `cooldownMin` elapses.
+7. Ramp / minSpeed / kick / invert unchanged (a pure-function `thermostatStep()` in `thermostat.h`, Arduino-free, host-tested).
+
+### 15.4 Cooling-rate learning (`thermal.h/.cpp`, passive)
+Sample `chamber` every 5 s. A *window* is a run of ≥ 60 s in which fan output stays within ±5 %, the door state is constant, and no heater is active (`bedTarget == 0 && nozzleTarget == 0`, i.e. after a print). For each window compute `k = −(dT/dt) / (T − ambientTemp)` (per minute) and blend into `k[bucket][door]` (buckets 0/25/50/75/100 % by nearest, door open/closed) with an EMA (α = 0.3); persist in config `thermal.k` (10 floats, samples count) at most every 10 min. Status exposes
+`"thermal": { "rateCPerMin": -0.42, "kClosed":[…5], "kOpen":[…5], "samples": n }` (NaN → null). No automatic gain tuning yet — the UI shows the numbers and explains them; MQTT publishes `rateCPerMin` as a sensor.
+
+### 15.5 Status / API / MQTT
+* `printer.phase` (string), `printer.doorOpen` (`null` while `doorKnown` is false), `printer.doorKnown`, `printer.doorEdgeCount`, `printer.chamberTarget` (null when unknown); `fan.effectiveMode` gains `door`, `preheat`, `chamber`; `fan.setpoint` (thermostat set point or null); `thermal` block as above.
+* `POST /api/fan` accepts `"mode":"chamber"`; MQTT `mode/set` likewise; HA `select.mode` options auto/manual/off/chamber; HA sensors `phase`, `cooling_rate` (°C/min); `number.chamber_target` (20..80) and `number.cooldown_target` (15..60) writable via `<base>/target/set` `{"chamberTarget":..,"cooldownTarget":..}` (or two topics `chamber_target/set`, `cooldown_target/set`).
+* Mock server: simulate door toggles (`POST /mock/door` or a `--door` flag), phases through the fake print (preheat → printing → finished → idle), a chamber model that reacts to fan output and door state, so the thermostat can be exercised.
+
+### 15.6 UI
+* Fan curve page: mode selector (Curve / Chamber thermostat / Manual / Off) with a "Chamber thermostat" card (target, cool-down target, Kp/Ki advanced, period); a "Printer state rules" card (door mode + speed + resume delay, preheat mode + speed) — tooltips explain *why* (preheat: fan would fight the heaters; door: nothing to exhaust / dust; cool-down: open door speeds it up, fan keeps running) and note that the top lid is not sensed and that the door rule stays inert until the printer has reported a door change.
+* Dashboard: phase chip (Preheating / Printing / Paused / Finished – cooling / Idle), door badge ("not reported" until doorKnown), thermostat set point and error when in chamber mode, cooling rate (°C/min) with the learned table in a collapsible "Thermal" card.
+
+## 16. Filament-aware cooling (2.0.2)
+
+The printer reports the loaded filament (`print.ams.ams[].tray[]`, `print.vt_tray`, `print.ams.tray_now`). The
+[Filament Field Guide](https://github.com/pwsh/filament-field-guide) (data CC BY 4.0) records per material the
+recommended ambient/chamber temperature, whether the enclosure should be *open* for cooling, whether a heated
+chamber is required, the part-cooling demand and the ventilation demand. Combining the two lets the device pick
+the chamber set point, cool-down behaviour and ventilation floor automatically, with user overrides.
+
+### 16.1 Data (`tools/gen_filament_db.py` → `src/blflow/filament_db.h`, committed)
+* Generator reads the guide (default: `https://pwsh.github.io/filament-field-guide/data/index.json` + per-entity
+  `data/filaments/<id>.json`; `--src <clone dir>` for offline) and emits a PROGMEM table of `FilamentInfo`:
+  `id[24]`, `name[32]`, `polymerClass` (enum), `chamberMin/Rec/Max` (int8 °C, −1 = n/a), `partCoolRec` (uint8 %),
+  `vent` (0 optional / 1 recommended / 2 required), `flags` (bit0 enclosureRecommended, bit1 heatedChamberRequired,
+  bit2 enclosureOpenForCooling, bit3 hardenedNozzle), `voc`, `particulate` (0..3). Header carries the source URL,
+  fetch date, record count and the CC BY 4.0 attribution. ~90 records ≈ 7 KB flash.
+* `tools/bambu_filament_ids.csv` (from Bambu Studio profiles, 100 rows: id,name,type) is embedded as a compact
+  `BambuFilament` table (`idx[8]`, `type[12]`) so a bare `tray_info_idx` still resolves to a material.
+
+### 16.2 Matching (`filament_match.h`, pure, host-tested)
+Input: `tray_type`, `tray_sub_brands`, `tray_info_idx`. Output: guide `id` (or "" = unknown) + `family` string.
+1. Normalise `tray_type`: upper-case, trim; split at the first `-` into BASE and MOD (`PLA-CF` → `PLA`,`CF`;
+   `PLA-AERO` → `PLA`,`AERO`; `PAHT-CF` → `PAHT`,`CF`; `TPU-AMS` → `TPU`; `SUPPORT…` → see 4).
+2. BASE → guide id: PLA→pla, PETG→petg, PCTG→pctg, ABS→abs, ASA→asa, PC→pc, PA/PAHT→pa, PA6→pa6, PA12→pa12,
+   PPA→ppa, TPU→tpu, PVA→pva, BVOH→bvoh, HIPS→hips, PET→pet, PPS→pps, PP→pp, PE→pe, EVA→eva, PHA→pha.
+   MOD ∈ {CF, GF}: use `<id>-cf`/`<id>-gf` when that guide id exists, else the base id (family keeps the "CF" hint).
+   MOD = AERO → base id. Unknown BASE → step 3.
+3. If `tray_type` is empty/unknown, use `tray_info_idx` through the Bambu table to get a `type`, then step 1–2.
+   As a last resort the prefix rule: GFA/GFL→PLA, GFB→ABS, GFC→PC, GFG→PETG, GFN→PA, GFP→PP, GFT→PPS, GFU→TPU.
+4. Support materials (`tray_type` starting `SUPPORT`, or `GFS0x`): profile of the *paired* material
+   (Support For PLA/PETG → pla, Support For PA/PET → pa, Support for ABS → abs, Support W → pla, Support G → pa);
+   PVA/BVOH/HIPS map to their own ids.
+5. The active tray: `tray_now` = `ams*4+slot` (0..15), `254` = `vt_tray`, `255`/none = no filament; H2D:
+   `device.extruder.info[active].snow` = `(ams<<8)|slot`, active extruder from `device.extruder.state>>4`.
+   Only the active tray is resolved (all trays are kept for the UI: id, type, colour, idx). AMS-HT ids ≥128 have one slot.
+
+### 16.3 Effective cooling profile (`filament.cpp`)
+From the matched `FilamentInfo`:
+```
+keepCool          = flags.enclosureOpenForCooling || chamberRec < 35
+chamberTarget     = keepCool ? chamberMax : chamberRec          // PLA → 30, PETG → 35, ABS → 50, ASA → 55, PC → 55
+cooldownTarget    = config.fan.cooldownTarget                    // unchanged unless overridden
+postPrintCooling  = partCoolRec >= 50 ? "fast" : "gentle"       // gentle: fan off until chamber < chamberTarget−10, then ≤ 50 %
+ventFloor         = config.filament.ventFloor[vent]              // % minimum output while printing (0 disables)
+heatedRequired    = flags.heatedChamberRequired                  // informational (X1/P1 cannot heat)
+```
+User config:
+```jsonc
+"filament": {
+  "auto": true,                 // use the loaded filament to set chamberTarget / cool-down / vent floor
+  "manualId": "",               // force a guide id when no tray data (external spool without RFID, P1 without AMS)
+  "ventFloor": { "optional": 0, "recommended": 0, "required": 10 },   // % — Bambu keeps the exhaust OFF for warm-chamber materials; raise only with a filtered exhaust
+  "overrides": [                // max 12; keys are guide ids or "*"; every value optional (null = keep)
+    { "id": "abs", "chamberTarget": 48, "cooldownTarget": 35, "ventFloor": 5, "postPrintCooling": "gentle" }
+  ]
+}
+```
+Resolution order: guide profile → `"*"` override → id override → (when `auto` is false) the plain `fan.*` values.
+Applies to: `chamber` mode set points (integrator reset when the set point moves > 5 °C), the cool-down window
+in both modes, the vent floor in both modes (never during `preheat`/`door` gating or `off`/`manual`), and the
+cool-down cap for `gentle`. Tray changes take effect immediately (multi-material prints).
+
+### 16.4 Status / API / MQTT / UI
+* Status: `"filament": { "source": "ams|external|manual|none", "tray": {"ams":0,"slot":0,"type":"ABS","subBrand":"","idx":"GFB00","color":"FFFFFFFF"},
+  "id":"abs", "name":"ABS", "family":"ABS", "profile": {"chamberRec":50,"chamberMax":60,"partCoolRec":0,"vent":"required","openForCooling":false,"heatedRequired":false},
+  "effective": {"chamberTarget":48,"cooldownTarget":35,"ventFloor":5,"postPrintCooling":"gentle","overridden":true},
+  "trays":[{"ams":0,"slot":0,"type":"ABS","idx":"GFB00","color":"FFFFFFFF","id":"abs"}, …, {"ams":-1,"slot":254,"type":"ASA","idx":"GFB01","id":"asa"}] }`
+* `GET /api/filaments` → the embedded guide table (id, name, class, chamber, vent, flags) for the UI's override editor.
+* HA: `sensor.filament` (state = name; attributes type/idx/id/vent/chamberTarget), `sensor.filament_chamber_target`.
+* UI: new **Filament** card on the Fan curve page — detected tray (colour swatch, type, Bambu id, sub-brand), matched
+  guide entry with its properties and a link `https://pwsh.github.io/filament-field-guide/#/filaments/<id>` ("Data: Filament
+  Field Guide, CC BY 4.0"), the *effective* targets with an "override for this material" editor (chamber target,
+  cool-down target, vent floor, post-print cooling) and the global vent-floor table; all trays listed; auto toggle
+  and manual id select (searchable list from `/api/filaments`). Dashboard: filament chip (colour + name) next to the phase chip.
+* Mock: `--filament ABS` and `POST /mock/tray {"now":"0"}`; the fake AMS is `test/fixtures/x1c_ams_trays.json`.
+* Tests: `test/test_filament` — matcher against every row of `tools/bambu_filament_ids.csv` (must resolve to a non-empty id
+  or a documented exception), the live fixture (`tray_now 0` → abs; `254` → asa), CF/GF fallbacks, support pairing,
+  effective-profile derivation (PLA keepCool → 30, ABS → 50, override precedence).

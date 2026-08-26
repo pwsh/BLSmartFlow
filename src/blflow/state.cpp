@@ -26,6 +26,7 @@ void stateInit()
     f.target = 0.0f;
     strlcpy(f.effectiveMode, "off", sizeof(f.effectiveMode));
     f.sourceTemp = TEMP_UNKNOWN;
+    f.setpoint = TEMP_UNKNOWN;
     f.pwmDuty = 0;
     f.manualExpiresAt = 0;
     f.kicking = false;
@@ -104,38 +105,9 @@ uint32_t printerDataAgeMs(const PrinterState& s)
     return millis() - s.lastUpdateMs;
 }
 
-const char* stageText(int stage)
-{
-    // Table from ha-bambulab's CURRENT_STAGE_IDS. 255 (and -1 internally) is the
-    // printer's "nothing in progress" value.
-    switch (stage) {
-        case 0:  return "printing";
-        case 1:  return "auto_bed_leveling";
-        case 2:  return "heatbed_preheating";
-        case 3:  return "sweeping_xy_mech_mode";
-        case 4:  return "changing_filament";
-        case 5:  return "m400_pause";
-        case 6:  return "paused_filament_runout";
-        case 7:  return "heating_hotend";
-        case 8:  return "calibrating_extrusion";
-        case 9:  return "scanning_bed_surface";
-        case 10: return "inspecting_first_layer";
-        case 11: return "identifying_build_plate_type";
-        case 12: return "calibrating_micro_lidar";
-        case 13: return "homing_toolhead";
-        case 14: return "cleaning_nozzle_tip";
-        case 15: return "checking_extruder_temperature";
-        case 16: return "paused_user";
-        case 17: return "paused_front_cover_falling";
-        case 18: return "calibrating_lidar";
-        case 19: return "calibrating_extrusion_flow";
-        case 20: return "paused_nozzle_temperature_malfunction";
-        case 21: return "paused_heat_bed_temperature_malfunction";
-        case -1:
-        case 255: return "idle";
-        default: return "unknown";
-    }
-}
+// The table itself lives in printer_parse.h so the host tests can reach it
+// (state.h drags in Arduino.h). Codes 0..77 plus -1/255 (idle) and -2 (offline).
+const char* stageText(int stage) { return stageName(stage); }
 
 const char* mqttStateText(int state)
 {

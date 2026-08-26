@@ -11,3 +11,6 @@ while printing, then sanitised (job/network identifiers removed). Use them to te
   Fan speeds are strings on a 0–15 scale (`big_fan1_speed: "6"` = aux fan 40 %).
 * `x1c_gcode_line.json` — a `print.command == "gcode_line"` acknowledgement; these arrive several times a
   minute and must be ignored by the parser.
+* `x1c_ams_trays.json` — the `ams` block and `vt_tray` from the same X1C while printing from AMS slot 0
+  (`ams.tray_now = "0"`): ABS `GFB00`, PLA `GFA00`, PLA-AERO `GFA11`, PLA `GFA05`, external spool ASA `GFB01`.
+  `tray_now` encoding: `ams_index*4 + slot`; `254` = external spool (`vt_tray`); `255` = none.

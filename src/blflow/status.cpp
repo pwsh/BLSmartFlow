@@ -8,6 +8,7 @@
 #include "ha_mqtt.h"
 #include "printer_link.h"
 #include "state.h"
+#include "thermal.h"
 #include "version.h"
 #include "wifi_manager.h"
 
@@ -83,7 +84,11 @@ void buildStatus(JsonObject out)
     pr["mqttState"] = p.mqttState;
     pr["mqttStateText"] = String(p.mqttStateText);
     pr["state"] = String(p.gcodeState);
-    pr["printing"] = printerIsPrinting(p);
+    const Phase phase = printerPhase(p);
+    pr["printing"] = phaseIsPrinting(phase);
+    // Derived phase (REWORK-SPEC 15.1): what the fan logic actually reasons
+    // about, which "RUNNING" on its own cannot express.
+    pr["phase"] = phaseName(phase);
     setCount(pr, "stage", p.stage);
     pr["stageText"] = stageText(p.stage);
     setCount(pr, "progress", p.progress);
@@ -91,7 +96,12 @@ void buildStatus(JsonObject out)
     setCount(pr, "layer", p.layer);
     setCount(pr, "totalLayers", p.totalLayers);
     pr["task"] = String(p.task);
-    pr["doorOpen"] = p.doorOpen;
+    // Null, not false: on some X1C units the door switch never actuates, and the
+    // raw bit means nothing until it has been seen to change (REWORK-SPEC 15.1).
+    if (p.doorKnown) pr["doorOpen"] = p.doorOpen;
+    else             pr["doorOpen"] = nullptr;
+    pr["doorKnown"] = p.doorKnown;
+    pr["doorEdgeCount"] = p.doorEdgeCount;
     pr["printError"] = p.printError;
     pr["wifiSignal"] = String(p.wifiSignal);
 
@@ -101,6 +111,7 @@ void buildStatus(JsonObject out)
     setTemp(t, "bed", p.bed);
     setTemp(t, "bedTarget", p.bedTarget);
     setTemp(t, "chamber", p.chamber);
+    setTemp(t, "chamberTarget", p.chamberTarget);
 
     JsonObject fans = pr["fans"].to<JsonObject>();
     setFan(fans, "part", p.fanPart);
@@ -115,11 +126,19 @@ void buildStatus(JsonObject out)
     fo["effectiveMode"] = String(f.effectiveMode);
     fo["source"] = String(c.fan.source);
     setTemp(fo, "sourceTemp", f.sourceTemp);
+    // The thermostat set point in force this instant; null in every other mode.
+    setTemp(fo, "setpoint", f.setpoint);
+    // Configured set points travel with the status so the Home Assistant number
+    // entities (and the UI) have a state to read back.
+    fo["chamberTarget"] = c.fan.chamberTarget;
+    fo["cooldownTarget"] = c.fan.cooldownTarget;
     fo["manualSpeed"] = c.fan.manualSpeed;
     fo["manualExpiresSec"] = fanManualExpiresInSec();
     fo["pwmDuty"] = f.pwmDuty;
     fo["output1"] = c.fan.output1;
     fo["output2"] = c.fan.output2;
+
+    thermalToJson(out["thermal"].to<JsonObject>());
 
     JsonObject mx = out["mqttExt"].to<JsonObject>();
     mx["enabled"] = c.mqtt.enabled;

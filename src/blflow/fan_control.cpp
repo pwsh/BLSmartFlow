@@ -6,6 +6,7 @@
 #include "log.h"
 #include "printer_link.h"
 #include "state.h"
+#include "thermostat.h"
 
 namespace blsf {
 
@@ -33,6 +34,17 @@ float    g_curveTarget = 0.0f;
 // When the print ended (millis()), for the onlyWhilePrinting cooldown.
 uint32_t g_printEndedMs = 0;
 bool     g_wasPrinting = false;
+
+// Chamber thermostat. The PI step itself is pure (thermostat.h); everything
+// stateful lives here so the controller can be reset the moment its set point
+// or its mode changes rather than dragging an old integral into a new regime.
+ThermostatState g_pi = {0.0f};
+uint32_t g_lastThermostatMs = 0;
+float    g_thermostatOut = 0.0f;
+float    g_lastSetpoint = NAN;
+
+// Door anti-flap: the door rule stays armed for doorResumeSec after the
+// door closes, so pulling a part out in three goes does not make the fan stutter.
 
 // Kick-start pulse bookkeeping. g_zeroSinceMs is when the output last reached
 // 0 %: a fan that is merely dipping through zero must not re-arm a kick on every
@@ -142,7 +154,8 @@ uint32_t fanManualExpiresInSec()
 bool fanApplyMode(const char* mode, int speed, uint32_t durationSec, bool& persist)
 {
     if (mode && *mode &&
-        strcmp(mode, "auto") != 0 && strcmp(mode, "manual") != 0 && strcmp(mode, "off") != 0) {
+        strcmp(mode, "auto") != 0 && strcmp(mode, "manual") != 0 &&
+        strcmp(mode, "off") != 0 && strcmp(mode, "chamber") != 0) {
         return false;
     }
     // A day is longer than any plausible override and keeps the deadline well
@@ -199,8 +212,9 @@ void fanControlLoop()
     const PrinterState p = printerSnapshot();
     FanState f = fanSnapshot();
 
-    // --- track print start/stop for the cooldown window ---
-    const bool printing = printerIsPrinting(p);
+    // --- print phase (REWORK-SPEC 15.1) and the cooldown window ---
+    const Phase phase = printerPhase(p);
+    const bool printing = phaseIsPrinting(phase);
     if (g_wasPrinting && !printing) g_printEndedMs = now;
     g_wasPrinting = printing;
 
@@ -227,13 +241,60 @@ void fanControlLoop()
     // yank the fan to the failsafe speed while the last reading is seconds old.
     // A dropped link simply ages out after staleSec (never-seen = UINT32_MAX).
     const bool stale = printerDataAgeMs(p) >= (uint32_t)fc.staleSec * 1000UL;
-    const bool cooling = fc.onlyWhilePrinting && !printing && g_printEndedMs != 0 &&
-                         (now - g_printEndedMs) < (uint32_t)fc.cooldownMin * 60000UL;
+
+    // A print that ended recently enough that the chamber is still worth
+    // emptying. In auto mode the window also ends early once the chamber has
+    // actually reached cooldownTarget - there is no point running for the full
+    // ten minutes when it is already cold (REWORK-SPEC 15.3 step 6).
+    const bool recentPrint = !printing && g_printEndedMs != 0 &&
+                             (now - g_printEndedMs) < (uint32_t)fc.cooldownMin * 60000UL;
+    const bool chamberCool = !isnan(p.chamber) && p.chamber <= (float)fc.cooldownTarget;
+    const bool cooling = fc.onlyWhilePrinting && recentPrint && !chamberCool;
+
+    // --- door rule (step 3) --------------------------------------------------
+    // While the door is open there is nothing to exhaust - the fan would just
+    // pull room air and dust straight through the printer. It stays armed for
+    // doorResumeSec after the door closes so three quick openings do not make
+    // the fan stutter. During a cool-down an open door is *helping*, so the rule
+    // deliberately does not apply there.
+    //
+    // Everything here is gated on doorKnown: on some X1C units the closed door
+    // never actuates the switch and the bit reads "open" from boot to power-off,
+    // so the rule stays inert until the printer has been seen to report a change.
+    const bool doorOpen = printerDoorOpen(p);
+    const bool doorRecentlyClosed = p.doorKnown && !doorOpen && p.lastDoorCloseMs != 0 &&
+                                    (now - p.lastDoorCloseMs) < (uint32_t)fc.doorResumeSec * 1000UL;
+    const bool doorPhaseRelevant = phase != Phase::Finished && phase != Phase::Cooling &&
+                                   phase != Phase::Idle;
+    const bool doorRule = strcmp(fc.doorMode, "ignore") != 0 && p.doorKnown &&
+                          doorPhaseRelevant && (doorOpen || doorRecentlyClosed);
+
+    // --- preheat rule (step 4) ----------------------------------------------
+    // An exhaust fan during warm-up is fighting the heaters: it costs time and
+    // energy and, on an enclosed printer, can stop the chamber reaching target.
+    const bool preheatRule = strcmp(fc.preheatMode, "ignore") != 0 && phase == Phase::Preheat;
+
+    const bool chamberMode = strcmp(fc.mode, "chamber") == 0;
+    // The thermostat needs a chamber reading; without one it has nothing to
+    // control and the curve is the honest fallback.
+    const bool thermostatUsable = chamberMode && !isnan(p.chamber);
+    const bool thermostatCooldown = phase == Phase::Finished || phase == Phase::Cooling ||
+                                    (phase == Phase::Idle && recentPrint);
+    float setpoint = NAN;
+    if (thermostatUsable) {
+        if (phaseIsPrinting(phase))    setpoint = (float)fc.chamberTarget;
+        else if (thermostatCooldown)   setpoint = (float)fc.cooldownTarget;
+    }
 
     const char* eff;
     if (strcmp(fc.mode, "off") == 0)          eff = "off";
     else if (strcmp(fc.mode, "manual") == 0)  eff = "manual";
     else if (stale)                           eff = "stale";
+    else if (doorRule)                        eff = "door";
+    else if (preheatRule)                     eff = "preheat";
+    else if (thermostatUsable && isnan(setpoint))           eff = "idle";
+    else if (thermostatUsable && thermostatCooldown)        eff = "cooldown";
+    else if (thermostatUsable)                              eff = "chamber";
     else if (fc.onlyWhilePrinting && !printing && !cooling) eff = "idle";
     else if (fc.onlyWhilePrinting && !printing)             eff = "cooldown";
     else                                      eff = "auto";
@@ -247,10 +308,36 @@ void fanControlLoop()
         target = (float)fc.manualSpeed;
     } else if (strcmp(eff, "idle") == 0) {
         target = 0.0f;
+    } else if (strcmp(eff, "door") == 0) {
+        target = strcmp(fc.doorMode, "fixed") == 0 ? (float)fc.doorSpeed : 0.0f;
+    } else if (strcmp(eff, "preheat") == 0) {
+        target = strcmp(fc.preheatMode, "fixed") == 0 ? (float)fc.preheatSpeed : 0.0f;
     } else if (strcmp(eff, "stale") == 0) {
         if (strcmp(fc.staleMode, "hold") == 0)       target = g_slew;
         else if (strcmp(fc.staleMode, "fixed") == 0) target = (float)fc.staleSpeed;
         else                                         target = 0.0f;
+    } else if (thermostatUsable) {
+        // Chamber thermostat (step 5). It only steps every thermostatPeriodSec -
+        // a PI loop on an enclosure that takes minutes to respond has nothing to
+        // gain from running ten times a second, and a long dt is what makes the
+        // integral term readable in percent per degree-second.
+        if (isnan(g_lastSetpoint) || fabsf(setpoint - g_lastSetpoint) > 0.01f) {
+            // Switching between print and cool-down set points is a new regime;
+            // carrying the old integral over would dump a step into the output.
+            thermostatReset(g_pi);
+            g_lastSetpoint = setpoint;
+            g_lastThermostatMs = 0;
+        }
+        const uint32_t periodMs = (uint32_t)fc.thermostatPeriodSec * 1000UL;
+        if (g_lastThermostatMs == 0 || (now - g_lastThermostatMs) >= periodMs) {
+            const float dtSec = g_lastThermostatMs == 0
+                                    ? (float)fc.thermostatPeriodSec
+                                    : (float)(now - g_lastThermostatMs) / 1000.0f;
+            g_lastThermostatMs = now;
+            g_thermostatOut = thermostatStep(g_pi, p.chamber, setpoint, fc.kp, fc.ki, dtSec,
+                                             /*freeze=*/doorOpen);
+        }
+        target = g_thermostatOut;
     } else {
         // auto / cooldown: follow the curve, with hysteresis on the source so a
         // sensor jittering by a fraction of a degree does not modulate the fan.
@@ -263,6 +350,20 @@ void fanControlLoop()
         }
         target = g_curveTarget;
     }
+    // Anything that is not the thermostat leaves it with a clean slate, so
+    // coming back from a door event or a manual override does not resume with a
+    // stale integral.
+    const bool thermostatRan = thermostatUsable && !isnan(setpoint) &&
+                               strcmp(eff, "door") != 0 && strcmp(eff, "preheat") != 0 &&
+                               strcmp(eff, "stale") != 0 && strcmp(eff, "off") != 0 &&
+                               strcmp(eff, "manual") != 0;
+    if (!thermostatRan) {
+        thermostatReset(g_pi);
+        g_lastThermostatMs = 0;
+        g_thermostatOut = 0.0f;
+        g_lastSetpoint = NAN;
+    }
+    f.setpoint = thermostatRan ? setpoint : NAN;
     if (target < 0.0f) target = 0.0f;
     if (target > 100.0f) target = 100.0f;
     f.target = target;

@@ -38,7 +38,7 @@ struct PrinterConfig {
 struct FanConfig {
     FanCurve curve;
     char     source[8];    // nozzle|bed|chamber|max
-    char     mode[8];      // auto|manual|off
+    char     mode[8];      // auto|manual|off|chamber
     uint8_t  manualSpeed;
     uint8_t  minSpeed;
     bool     kickStart;
@@ -54,6 +54,28 @@ struct FanConfig {
     uint16_t staleSec;
     char     staleMode[6]; // hold|off|fixed
     uint8_t  staleSpeed;
+
+    // --- thermal states (REWORK-SPEC 15.2) ---
+    char     doorMode[8];       // ignore|off|fixed - what to do while the front door is open
+    uint8_t  doorSpeed;         // % used by doorMode=fixed
+    uint16_t doorResumeSec;     // anti-flap delay after the door closes
+    char     preheatMode[8];    // ignore|off|fixed - what to do while the printer heats up
+    uint8_t  preheatSpeed;      // % used by preheatMode=fixed
+    uint8_t  chamberTarget;     // degC thermostat set point while printing
+    uint8_t  cooldownTarget;    // degC the chamber is cooled down to after a print
+    float    kp;                // % per degC
+    float    ki;                // % per degC*s
+    uint8_t  thermostatPeriodSec;
+    uint8_t  ambientTemp;       // degC assumed room temperature for the cooling estimate
+};
+
+// Learned Newtonian cooling constants (REWORK-SPEC 15.4), in 1/min, indexed by
+// fan-output bucket (0/25/50/75/100 %). NaN = never measured. Persisted so a
+// power cut does not throw away hours of passive observation.
+struct ThermalConfig {
+    float    kClosed[5];
+    float    kOpen[5];
+    uint32_t samples;
 };
 
 struct MqttConfig {
@@ -92,6 +114,7 @@ struct Config {
     WebConfig     web;
     DebugConfig   debug;
     SsdpConfig    ssdp;
+    ThermalConfig thermal;
 };
 
 // The single live instance. Written from the loop task, the AsyncTCP task (every

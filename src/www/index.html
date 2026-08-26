@@ -279,7 +279,7 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
         </svg>
         <div style="min-width:0">
           <div class="big"><span id="fanOut">--</span><small>%</small></div>
-          <div class="mode-line"><span class="mode-chip" id="modeChip">-</span><span class="badge" id="targetBadge" data-tip="Target speed the controller is aiming at right now. The output moves towards it at the configured ramp rate; minimum speed and kick-start can make the actual output differ for a moment.">target -</span></div>
+          <div class="mode-line"><span class="mode-chip" id="modeChip">-</span><span class="badge" id="targetBadge" data-tip="Target speed the controller is aiming at right now. The output moves towards it at the configured ramp rate; minimum speed and kick-start can make the actual output differ for a moment.">target -</span><span class="badge" id="spBadge" hidden data-tip="The chamber temperature the thermostat is holding, and how far the chamber currently is from it. A positive error means the chamber is too hot and the fan is being asked for more.">set point -</span></div>
           <p class="mode-expl" id="modeExpl">Waiting for the first status update...</p>
         </div>
       </div>
@@ -318,7 +318,7 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
     </div>
 
     <div class="card">
-      <header><h3>Print job</h3><span class="grow"></span><span class="badge" id="stateBadge">-</span></header>
+      <header><h3>Print job</h3><span class="grow"></span><span class="badge" id="phaseChip" data-tip="What the printer is doing, worked out from its state, its current stage and its temperature targets. This - not the raw state - is what the door and preheat rules and the thermostat react to.">-</span><span class="badge" id="doorChip" data-tip="The front-door switch. The top lid has no sensor at all.">-</span><span class="badge" id="stateBadge">-</span></header>
       <div class="row" style="justify-content:space-between"><b id="jobName" style="overflow-wrap:anywhere">No active job</b><span class="mono" id="jobPct">0 %</span></div>
       <div class="bar" style="margin:8px 0 10px"><i id="jobBar"></i></div>
       <dl class="kv">
@@ -328,6 +328,22 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
         <dt>Door</dt><dd id="jobDoor">-</dd>
         <dt>Printer WiFi</dt><dd id="jobPwifi">-</dd>
       </dl>
+    </div>
+
+    <div class="card">
+      <header><h3>Thermal</h3><span class="grow"></span><span class="badge" id="rateBadge" data-tip="How fast the chamber temperature is changing right now, in degrees per minute. Negative means it is cooling. It appears once the fan output and the door have been steady for about twenty seconds - before that there is nothing meaningful to measure.">-</span></header>
+      <div class="stats">
+        <div class="stat" data-tip="Chamber temperature as reported by the printer. Only X1/H2D style machines have this sensor."><div class="l">Chamber</div><div class="v"><span id="thCha">--</span><small> &deg;C</small></div></div>
+        <div class="stat" data-tip="Where the thermostat is aiming: the chamber target while printing, the cool-down target afterwards. Shown only in Chamber thermostat mode."><div class="l">Set point</div><div class="v"><span id="thSp">--</span><small> &deg;C</small></div></div>
+        <div class="stat" data-tip="Current rate of change of the chamber temperature, in &deg;C per minute. Negative while it cools."><div class="l">Rate</div><div class="v"><span id="thRate">--</span><small> &deg;C/min</small></div></div>
+      </div>
+      <details style="margin-top:12px"><summary style="cursor:pointer;font-size:13px;font-weight:600">Learned cooling rates <span class="unit" id="thSamples"></span></summary>
+        <p class="hint" style="margin:8px 0">Measured quietly in the background, never used to drive the fan. Whenever the fan output and the door stay put for a minute with the heaters off, the device fits Newton's cooling law to the chamber and records the constant <b>k</b> for that fan setting. Bigger k means faster cooling: the chamber loses roughly <b>k &times; (chamber - room)</b> degrees per minute. A dash means that combination has not happened yet.</p>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Fan output</th><th>Door closed <span class="unit">1/min</span></th><th>Door open <span class="unit">1/min</span></th></tr></thead>
+          <tbody id="thRows"></tbody>
+        </table></div>
+      </details>
     </div>
 
     <div class="card">
@@ -349,6 +365,17 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
 <section id="p-curve" hidden aria-labelledby="h-curve">
   <div class="page-h"><h2 id="h-curve">Fan curve</h2><p>Map the source temperature to a fan speed. Drag the points, edit the table, or start from a preset - then save to the device.</p></div>
   <div class="grid wide">
+
+    <div class="card span2">
+      <header><h3>Fan mode</h3><span class="grow"></span><span class="badge" id="modeNow" data-tip="What the controller is actually doing this second. It can differ from the selected mode: a door rule, a preheat rule, the stale-data failsafe or the idle gate all take priority over the mode you picked.">-</span></header>
+      <div class="seg" role="group" aria-label="Fan mode" id="modeSeg">
+        <button type="button" data-mode="auto" aria-pressed="false" data-tip="Follow the fan curve. The output is read straight off the curve using the source temperature - the right choice when you are cooling a part or venting by nozzle temperature, because the fan tracks the heat being produced rather than the air that is already warm.">Curve</button>
+        <button type="button" data-mode="chamber" aria-pressed="false" data-tip="Hold the chamber at a set temperature instead of following a curve. A curve can only guess how hard to blow; a thermostat measures the result and corrects itself, which is what you want for ABS/ASA where too much airflow warps the print and too little cooks the electronics. Needs a printer that reports a chamber temperature.">Chamber thermostat</button>
+        <button type="button" data-mode="manual" aria-pressed="false" data-tip="Run at one fixed speed and ignore every temperature. Useful while you work out what your fan can do, or as a permanent setting for a quiet trickle of ventilation.">Manual</button>
+        <button type="button" data-mode="off" aria-pressed="false" data-tip="Hold both outputs at 0 % and stop evaluating anything. Nothing here changes the fan again until you pick another mode.">Off</button>
+      </div>
+      <p class="hint" id="modeHint" style="margin:10px 0 0">The fan follows the curve below.</p>
+    </div>
 
     <div class="card span2">
       <header><h3>Curve</h3><span class="grow"></span>
@@ -375,6 +402,54 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
         <thead><tr><th style="width:44px">#</th><th>Temperature <span class="unit">&deg;C</span></th><th>Speed <span class="unit">%</span></th><th style="width:52px"><span class="sr">Remove</span></th></tr></thead>
         <tbody id="cvRows"></tbody>
       </table></div>
+    </div>
+
+    <div class="card" id="thermoCard">
+      <header><h3>Chamber thermostat</h3><span class="grow"></span><span class="badge" id="thermoBadge" data-tip="Live thermostat state: the chamber temperature, the set point it is aiming at, and how far off it is. It only runs in Chamber thermostat mode.">-</span></header>
+      <p class="hint">Used only in <b>Chamber thermostat</b> mode. The controller measures the chamber and adjusts the fan until it sits at the set point, instead of guessing from a curve.</p>
+      <div class="row">
+        <div class="field"><label for="f-ctarget">Chamber target <span class="unit">&deg;C</span> <button class="qm" type="button" data-tip="The temperature to hold while a print is running. Too low and an ABS print warps and splits; too high and the electronics, the belts and the filament in the AMS suffer. 45-50 &deg;C suits ABS/ASA, 35-40 &deg;C suits PETG, and PLA wants the chamber as cool as the room. Range 20-80 &deg;C.">?</button></label>
+          <input type="number" id="f-ctarget" data-path="fan.chamberTarget" min="20" max="80" step="1" data-tip="Chamber set point held while printing, 20-80 &deg;C. Typical: 45 for ABS/ASA, 35 for PETG."></div>
+        <div class="field"><label for="f-cdtarget">Cool-down target <span class="unit">&deg;C</span> <button class="qm" type="button" data-tip="After the print, the fan keeps running until the chamber has dropped to this temperature. That is what lets you open the printer and lift the part off without it still being soft - and in Curve mode it also ends the cool-down window early, so the fan does not run out its full timer on an already cold chamber. Range 15-60 &deg;C.">?</button></label>
+          <input type="number" id="f-cdtarget" data-path="fan.cooldownTarget" min="15" max="60" step="1" data-tip="Temperature the chamber is emptied down to after a print, 15-60 &deg;C. Also ends the Curve-mode cool-down early."></div>
+      </div>
+      <details style="margin-top:6px"><summary style="cursor:pointer;font-size:13px;font-weight:600">Advanced: controller gains</summary>
+        <p class="hint" style="margin:8px 0">Leave these alone unless the fan hunts up and down or takes far too long to settle. Larger Kp reacts harder to the error right now; larger Ki slowly removes an error that will not go away on its own.</p>
+        <div class="row">
+          <div class="field"><label for="f-kp">Kp <span class="unit">%/&deg;C</span> <button class="qm" type="button" data-tip="Proportional gain: how much fan you get per degree above the set point. At 8 %/&deg;C being 5 &deg;C too hot asks for 40 % fan. Raise it if the chamber overshoots for a long time before the fan reacts; lower it if the fan surges up and down. Range 0-50.">?</button></label>
+            <input type="number" id="f-kp" data-path="fan.kp" min="0" max="50" step="0.5" data-tip="Proportional gain in percent of fan per &deg;C of error. Range 0-50, default 8."></div>
+          <div class="field"><label for="f-ki">Ki <span class="unit">%/&deg;C&middot;s</span> <button class="qm" type="button" data-tip="Integral gain: removes a small error that the proportional term alone can never clear, by slowly building output while the chamber stays off target. Too much causes a long overshoot after the door is closed. The controller freezes it while the door is open or the fan is already flat out, so it cannot wind up. Range 0-1.">?</button></label>
+            <input type="number" id="f-ki" data-path="fan.ki" min="0" max="1" step="0.005" data-tip="Integral gain in percent of fan per &deg;C-second. Range 0-1, default 0.02. Frozen while the door is open or the output is saturated."></div>
+        </div>
+        <div class="row">
+          <div class="field"><label for="f-period">Update period <span class="unit">s</span> <button class="qm" type="button" data-tip="How often the thermostat recalculates. An enclosure takes minutes to respond, so there is nothing to gain from running faster - and a slow loop keeps the fan from chasing sensor noise. Range 1-60 s.">?</button></label>
+            <input type="number" id="f-period" data-path="fan.thermostatPeriodSec" min="1" max="60" step="1" data-tip="Thermostat recalculation interval in seconds. Range 1-60, default 5."></div>
+          <div class="field"><label for="f-ambient">Room temperature <span class="unit">&deg;C</span> <button class="qm" type="button" data-tip="Roughly how warm the room is. It is not used to control the fan; it is the baseline for the cooling-rate figures on the dashboard, because a chamber can never be cooled below the air being blown into it. Range 0-40 &deg;C.">?</button></label>
+            <input type="number" id="f-ambient" data-path="fan.ambientTemp" min="0" max="40" step="1" data-tip="Assumed room temperature, 0-40 &deg;C. Used only for the cooling-rate estimate."></div>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <header><h3>Printer state rules</h3><span class="grow"></span><button class="qm" type="button" data-tip="Overrides that watch what the printer is doing rather than how hot it is. They sit above the curve and the thermostat: while one of them applies it decides the output, whatever the temperature says. The door rule stays inert until the printer has reported a door change at least once.">?</button></header>
+      <p class="hint">These apply in Curve and Chamber thermostat mode. They are skipped in Manual and Off.</p>
+      <div class="row">
+        <div class="field"><label for="f-doormode">Door open <button class="qm" type="button" data-tip="What the fan should do while the front door is open. With the door up there is nothing to exhaust - the fan just pulls room air and dust straight through the machine, and on a chamber print it dumps the heat you were holding. 'Stop the fan' is the usual answer. The rule is skipped after a print, when an open door is helping the chamber cool.">?</button></label>
+          <select id="f-doormode" data-path="fan.doorMode" data-tip="Behaviour while the front door is open: ignore it, stop the fan, or run at a fixed low speed.">
+            <option value="ignore">Ignore - carry on</option><option value="off">Stop the fan</option><option value="fixed">Fixed speed</option></select></div>
+        <div class="field"><label for="f-doorspeed">Speed <span class="unit">%</span> <button class="qm" type="button" data-tip="Speed used while the door is open, when the rule above is set to 'Fixed speed'. A low trickle keeps fumes moving towards the filter without blasting dust into the printer. Range 0-100 %.">?</button></label>
+          <input type="number" id="f-doorspeed" data-path="fan.doorSpeed" min="0" max="100" step="1" data-tip="Fan speed while the front door is open, used by the 'Fixed speed' setting. Range 0-100 %."></div>
+      </div>
+      <div class="field"><label for="f-doorresume">Resume delay <span class="unit">s</span> <button class="qm" type="button" data-tip="How long the door rule stays in force after the door closes. Fitting a part or swapping filament usually means opening and shutting the door several times in a row; without this delay the fan would stutter on and off through the whole operation. Range 0-300 s, 5 s is plenty.">?</button></label>
+        <input type="number" id="f-doorresume" data-path="fan.doorResumeSec" min="0" max="300" step="1" data-tip="Seconds the door rule stays active after the door closes, to stop the fan flapping. Range 0-300, default 5."></div>
+      <p class="hint" style="margin:2px 0 12px"><b>The top lid is not sensed</b> - the printer only has a plunger switch on the front door, so lifting the lid changes nothing here. And on some X1C units a closed door never presses that switch, so the bit reads &quot;open&quot; forever. To avoid running the fan rule off a stuck bit, the door is treated as <b>closed</b> until the printer has been seen to report an actual change; until then the dashboard shows <i>Door: not reported</i> and these settings do nothing. Open and close the door once to find out which kind of printer you have.</p>
+      <div class="row">
+        <div class="field"><label for="f-preheatmode">While preheating <button class="qm" type="button" data-tip="What the fan should do while the printer is bringing the bed, hotend or chamber up to temperature. An exhaust fan running during warm-up is fighting the heaters: the print starts later, uses more power, and on an enclosed printer the chamber may never reach its target at all. Stopping the fan until the printer is at temperature costs nothing.">?</button></label>
+          <select id="f-preheatmode" data-path="fan.preheatMode" data-tip="Behaviour during preheat: ignore it, stop the fan, or run at a fixed low speed.">
+            <option value="ignore">Ignore - carry on</option><option value="off">Stop the fan</option><option value="fixed">Fixed speed</option></select></div>
+        <div class="field"><label for="f-preheatspeed">Speed <span class="unit">%</span> <button class="qm" type="button" data-tip="Speed used while preheating, when the rule above is set to 'Fixed speed'. Keep it low - anything more and the heaters spend their power on the room. Range 0-100 %.">?</button></label>
+          <input type="number" id="f-preheatspeed" data-path="fan.preheatSpeed" min="0" max="100" step="1" data-tip="Fan speed during preheat, used by the 'Fixed speed' setting. Range 0-100 %."></div>
+      </div>
     </div>
 
     <div class="card">
@@ -923,8 +998,22 @@ const MODES = {
   manual: ["Manual", "A fixed speed set by you; the curve is ignored until you switch back to auto."],
   off: ["Off", "Both outputs are held at 0 % - the curve is not evaluated."],
   stale: ["Stale data - failsafe", "No fresh data from the printer, so the stale-data failsafe from the Fan Curve page decides the output."],
-  idle: ["Idle", "'Only while printing' is on and no print is running, so the fan stays off."],
-  cooldown: ["Cooldown", "The print has finished; the curve keeps running until the cooldown time expires."]
+  idle: ["Idle", "Nothing to cool: no print is running and the cooldown has finished, so the fan stays off."],
+  cooldown: ["Cooldown", "The print has ended; the fan keeps running until the chamber reaches the cool-down target or the cooldown time expires."],
+  door: ["Door open", "The printer is open, so there is nothing to exhaust - the door rule on the Fan Curve page is deciding the output."],
+  preheat: ["Preheating", "The printer is coming up to temperature and the fan would be fighting the heaters, so the preheat rule is deciding the output."],
+  chamber: ["Chamber thermostat", "The fan is being adjusted to hold the chamber at its set point."]
+};
+/* label + tone for printer.phase */
+const PHASES = {
+  offline: ["Offline", "", "No reports from the printer, so nothing about the print is known."],
+  idle: ["Idle", "", "The printer is on but not printing."],
+  preheat: ["Preheating", "warn", "The bed, hotend or chamber is still coming up to temperature."],
+  printing: ["Printing", "ok", "The print is running at temperature."],
+  paused: ["Paused", "warn", "The print is suspended - by you, by a filament runout, or by an error."],
+  cooling: ["Cooling", "", "The printer is deliberately getting rid of heat."],
+  finished: ["Finished - cooling", "ok", "The print is done; the chamber is still being emptied of heat."],
+  failed: ["Failed", "err", "The print stopped with an error."]
 };
 const bars = (rssi, n) => { n = n == null ? (rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -75 ? 2 : rssi >= -85 ? 1 : 0) : n; let h = ""; for (let i = 1; i <= 4; i++) h += '<i class="' + (i <= n ? "on" : "") + '"></i>'; return '<span class="bars" aria-hidden="true">' + h + "</span>"; };
 const badge = (cls, tip, html) => '<span class="badge ' + cls + '" data-tip="' + esc(tip) + '"><span class="dot"></span>' + html + "</span>";
@@ -947,6 +1036,11 @@ function renderStatus(st) {
   $("#modeChip").style.color = f.effectiveMode === "stale" ? "var(--err)" : f.effectiveMode === "auto" ? "var(--ok)" : "var(--fg)";
   $("#modeExpl").textContent = m[1];
   $("#targetBadge").textContent = "target " + f.target + " %";
+  /* thermostat set point + how far the chamber is from it */
+  const sp = f.setpoint, cha = t.chamber;
+  $("#spBadge").hidden = sp == null;
+  if (sp != null) $("#spBadge").textContent = "set point " + t1(sp) + " \u00b0C" +
+    (cha == null ? "" : " (" + (cha - sp >= 0 ? "+" : "") + t1(cha - sp) + ")");
   $("#dutyBadge").textContent = "duty " + f.pwmDuty + "/255";
   $("#srcBadge").textContent = "source: " + f.source;
   $("#ovExpiry").hidden = !f.manualExpiresSec;
@@ -960,6 +1054,11 @@ function renderStatus(st) {
   $("#fPart").textContent = (fa.part ?? "-") + " %"; $("#fAux").textContent = (fa.aux ?? "-") + " %";
   $("#fCha").textContent = (fa.chamber ?? "-") + " %"; $("#fHb").textContent = (fa.heatbreak ?? "-") + " %";
   /* --- job --- */
+  const ph = PHASES[p.phase] || [p.phase || "-", "", ""];
+  $("#phaseChip").textContent = ph[0];
+  $("#phaseChip").className = "badge " + ph[1];
+  $("#phaseChip").setAttribute("data-tip", ph[2] +
+    " The door and preheat rules and the chamber thermostat all react to this, not to the raw printer state.");
   $("#stateBadge").textContent = p.state || "-";
   $("#stateBadge").className = "badge " + (p.printing ? "ok" : "");
   $("#jobName").textContent = p.task || "No active job";
@@ -969,7 +1068,26 @@ function renderStatus(st) {
   $("#jobStage").textContent = p.stageText || "-";
   $("#jobRem").textContent = (p.remainingMin == null || !p.remainingMin) ? "-" : dur(p.remainingMin * 60);
   $("#jobLayer").textContent = p.totalLayers == null ? "-" : (p.layer ?? "-") + " / " + p.totalLayers;
-  $("#jobDoor").textContent = p.doorOpen ? "open" : "closed";
+  /* doorOpen is null until the printer has been seen to report a change - some
+     X1C units leave the bit stuck at "open", so an unproven bit is not shown as
+     a state and the door rule stays inert. */
+  const dc = $("#doorChip");
+  if (p.doorOpen == null) {
+    dc.textContent = "Door: not reported";
+    dc.className = "badge";
+    dc.style.opacity = ".6";
+    dc.setAttribute("data-tip", "The printer has not reported the door changing yet, so its switch cannot be trusted - on some X1C units a closed door never presses it and the bit reads 'open' forever. Until a change is seen, the door counts as closed and the door rule on the Fan Curve page does nothing. Open and close the front door once to find out whether yours reports. The top lid has no sensor at all.");
+    $("#jobDoor").textContent = "not reported";
+  } else {
+    dc.textContent = "Door " + (p.doorOpen ? "open" : "closed");
+    dc.className = "badge " + (p.doorOpen ? "warn" : "ok");
+    dc.style.opacity = "";
+    dc.setAttribute("data-tip", "The front-door plunger switch, as reported by the printer" +
+      (p.doorEdgeCount ? " (" + p.doorEdgeCount + " change" + (p.doorEdgeCount > 1 ? "s" : "") + " since the device booted)" : "") +
+      ". The top lid has no sensor at all, so opening it does not show here.");
+    $("#jobDoor").textContent = (p.doorOpen ? "open" : "closed") +
+      (p.doorEdgeCount ? " (" + p.doorEdgeCount + " change" + (p.doorEdgeCount > 1 ? "s" : "") + ")" : "");
+  }
   $("#jobPwifi").textContent = p.wifiSignal || "-";
   /* --- connection badges --- */
   const wifiB = d.apMode
@@ -1012,10 +1130,46 @@ function renderStatus(st) {
   $("#mqBadge").textContent = !st.mqttExt.enabled ? "disabled" : st.mqttExt.connected ? "connected" : "not connected";
   $("#mqBadge").className = "badge " + (!st.mqttExt.enabled ? "" : st.mqttExt.connected ? "ok" : "err");
   renderTopics();
+  /* --- thermal card --- */
+  renderThermal(st);
+  /* --- fan mode selector on the curve page --- */
+  $$("#modeSeg button").forEach(b => b.setAttribute("aria-pressed", b.dataset.mode === f.mode ? "true" : "false"));
+  $("#modeNow").textContent = "now: " + (MODES[f.effectiveMode] || [f.effectiveMode])[0];
+  $("#modeHint").textContent = MODE_HINTS[f.mode] || "";
+  $("#thermoCard").style.opacity = f.mode === "chamber" ? "" : ".62";
+  const err = (f.setpoint != null && t.chamber != null) ? t.chamber - f.setpoint : null;
+  $("#thermoBadge").textContent = f.setpoint == null ? "not active"
+    : t1(t.chamber) + " \u00b0C \u2192 " + t1(f.setpoint) + " \u00b0C" +
+      (err == null ? "" : " (" + (err >= 0 ? "+" : "") + t1(err) + ")");
+  $("#thermoBadge").className = "badge " + (f.setpoint == null ? "" : Math.abs(err ?? 0) <= 1.5 ? "ok" : "warn");
   /* --- override slider follows the device unless the user is dragging --- */
   const sl = $("#ovSpeed");
   if (document.activeElement !== sl && !sl.dataset.hold) { sl.value = f.manualSpeed; $("#ovSpeedVal").textContent = f.manualSpeed + " %"; }
   drawCurve();
+}
+
+const MODE_LABELS = { auto: "Curve", chamber: "Chamber thermostat", manual: "Manual", off: "Off" };
+const MODE_HINTS = {
+  auto: "The fan follows the curve below, using the source temperature you picked under Control behaviour.",
+  chamber: "The fan is adjusted until the chamber sits at the target temperature. The curve is ignored, but the printer state rules below still apply.",
+  manual: "The fan runs at the manual speed from the dashboard and ignores every temperature.",
+  off: "Both outputs are held at 0 %. Nothing below has any effect until you pick another mode."
+};
+
+/* Thermal card: live rate plus the passively learned cooling constants. */
+function renderThermal(st) {
+  const th = st.thermal || {}, t = st.printer.temps || {}, f = st.fan;
+  $("#thCha").textContent = t1(t.chamber);
+  $("#thSp").textContent = t1(f.setpoint);
+  $("#thRate").textContent = th.rateCPerMin == null ? "--" : (th.rateCPerMin > 0 ? "+" : "") + t1(th.rateCPerMin);
+  $("#rateBadge").textContent = th.rateCPerMin == null ? "measuring..."
+    : (th.rateCPerMin > 0 ? "warming " : "cooling ") + t1(Math.abs(th.rateCPerMin)) + " \u00b0C/min";
+  $("#rateBadge").className = "badge " + (th.rateCPerMin == null ? "" : th.rateCPerMin < 0 ? "ok" : "warn");
+  $("#thSamples").textContent = th.samples ? "(" + th.samples + " measurement" + (th.samples > 1 ? "s" : "") + ")" : "(none yet)";
+  const kc = th.kClosed || [], ko = th.kOpen || [];
+  const cell = v => v == null ? "&ndash;" : (Math.round(v * 1000) / 1000).toFixed(3);
+  $("#thRows").innerHTML = [0, 25, 50, 75, 100].map((pct, i) =>
+    "<tr><td>" + pct + " %</td><td>" + cell(kc[i]) + "</td><td>" + cell(ko[i]) + "</td></tr>").join("");
 }
 
 /* --------------------------- curve ----------------------------- */
@@ -1196,6 +1350,20 @@ function wirePages() {
   });
   $("#rng100").addEventListener("click", () => setRange(100));
   $("#rng400").addEventListener("click", () => setRange(400));
+
+  /* Fan mode applies at once - it is a command, not a form field, so it never
+     sits in the save bar waiting to be forgotten. */
+  $$("#modeSeg button").forEach(b => b.addEventListener("click", async () => {
+    const mode = b.dataset.mode;
+    $$("#modeSeg button").forEach(x => x.disabled = true);
+    try {
+      const r = await api("POST", "/api/fan", { mode });
+      if (S.cfg) S.cfg.fan.mode = mode;
+      if (r && r.fan) renderStatus(Object.assign({}, S.st, { fan: r.fan }));
+      toast("Fan mode: " + MODE_LABELS[mode], "ok");
+    } catch (e) { fail(e); }
+    finally { $$("#modeSeg button").forEach(x => x.disabled = false); }
+  }));
 
   /* each card's Save button writes only its own section; the save bar writes everything */
   ["prSave", "mqSave", "webSave", "diagSave"].forEach(id => {

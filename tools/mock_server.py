@@ -6,12 +6,15 @@ Implements every /api/* route of docs/REWORK-SPEC.md section 9 against an
 in-memory config (section 5) plus a simulated printer and fan controller
 (section 6), so src/www/index.html can be developed without hardware.
 
-    python3 tools/mock_server.py [--port 8080] [--ap] [--offline] [--auth user:pass]
+    python3 tools/mock_server.py [--port 8080] [--ap] [--offline] [--auth user:pass] [--door]
 
   --ap       simulate AP / provisioning mode (device.apMode = true, no STA)
   --offline  the printer never connects (temps/counters null, lastUpdateSec null,
              effectiveMode stale)
   --auth     require HTTP basic auth on every route (as web.authEnabled does)
+  --door     start with the door reported open (toggle later with
+             POST /mock/door {"open":true|false} or {"toggle":true}); note that
+             doorKnown stays false until the first toggle, exactly as on hardware
 """
 
 import argparse
@@ -60,6 +63,11 @@ def default_config():
             "pwmFreq": 25000, "pwmInvert": False, "output1": True, "output2": True,
             "onlyWhilePrinting": False, "cooldownMin": 10,
             "staleSec": 120, "staleMode": "off", "staleSpeed": 0,
+            # thermal states (spec 15.2)
+            "doorMode": "ignore", "doorSpeed": 0, "doorResumeSec": 5,
+            "preheatMode": "off", "preheatSpeed": 0,
+            "chamberTarget": 45, "cooldownTarget": 35,
+            "kp": 8.0, "ki": 0.02, "thermostatPeriodSec": 5, "ambientTemp": 25,
         },
         "mqtt": {"enabled": False, "host": "", "port": 1883, "user": "", "password": "",
                  "baseTopic": "", "haDiscovery": True, "haPrefix": "homeassistant",
@@ -67,6 +75,8 @@ def default_config():
         "web": {"authEnabled": False, "user": "admin", "password": ""},
         "debug": {"serial": True, "mqttDump": False},
         "ssdp": {"enabled": True},
+        # learned cooling constants: 5 closed buckets then 5 open ones, null = unmeasured
+        "thermal": {"k": [None] * 10, "samples": 0},
     }
 
 
@@ -158,8 +168,20 @@ def validate_config(cfg):
     _clamp_num(f, "cooldownMin", 0, 1440, int)
     _clamp_num(f, "staleSec", 10, 3600, int)
     f["source"] = _enum(f.get("source"), ("nozzle", "bed", "chamber", "max"), "nozzle")
-    f["mode"] = _enum(f.get("mode"), ("auto", "manual", "off"), "auto")
+    f["mode"] = _enum(f.get("mode"), ("auto", "manual", "off", "chamber"), "auto")
     f["staleMode"] = _enum(f.get("staleMode"), ("hold", "off", "fixed"), "off")
+    # thermal states (spec 15.2)
+    for k in ("doorSpeed", "preheatSpeed"):
+        _clamp_num(f, k, 0, 100, int)
+    _clamp_num(f, "doorResumeSec", 0, 300, int)
+    _clamp_num(f, "chamberTarget", 20, 80, int)
+    _clamp_num(f, "cooldownTarget", 15, 60, int)
+    _clamp_num(f, "kp", 0.0, 50.0, float)
+    _clamp_num(f, "ki", 0.0, 1.0, float)
+    _clamp_num(f, "thermostatPeriodSec", 1, 60, int)
+    _clamp_num(f, "ambientTemp", 0, 40, int)
+    f["doorMode"] = _enum(f.get("doorMode"), ("ignore", "off", "fixed"), "ignore")
+    f["preheatMode"] = _enum(f.get("preheatMode"), ("ignore", "off", "fixed"), "off")
     pts, _err = validate_curve(f.get("curve"))
     if pts:
         f["curve"] = pts
@@ -264,11 +286,30 @@ BUS = Bus()
 # simulator: printer + fan controller
 # --------------------------------------------------------------------------
 
-STAGES = {-1: "idle", 0: "printing", 1: "auto bed levelling", 2: "heatbed preheating",
-          8: "calibrating extrusion", 9: "scanning bed surface", 11: "calibrating motor noise",
-          14: "cleaning nozzle tip", 20: "cooling chamber"}
+# A trimmed stg_cur table; the firmware carries the full 0..77 list. Only the
+# codes this simulation actually walks through are needed here.
+STAGES = {-2: "offline", -1: "idle", 0: "printing", 1: "auto_bed_leveling",
+          2: "heatbed_preheating", 7: "heating_hotend", 8: "calibrating_extrusion",
+          9: "scanning_bed_surface", 14: "cleaning_nozzle_tip", 29: "cooling_chamber",
+          49: "heating_chamber", 255: "idle"}
 
-SCENARIO = [("IDLE", 12), ("PREPARE", 18), ("RUNNING", 150), ("FINISH", 12)]
+PAUSE_STAGES = {5, 6, 16, 17, 20, 21, 23, 26, 27, 28, 30, 32, 33, 34, 35}
+PREHEAT_STAGES = {2, 7, 49, 54, 58, 63, 64}
+COOLING_STAGES = {29, 50, 69}
+
+# (gcode_state, seconds, stg_cur) - one loop of the fake print. The phase the UI
+# shows is *derived* from these plus the temperatures, exactly as the firmware
+# derives it, so the mock exercises the same rules.
+SCENARIO = [("IDLE", 60, -1), ("PREPARE", 18, 2), ("RUNNING", 150, 0),
+            ("FINISH", 90, 29)]
+
+# Chamber model (spec 15.6): dT/dt = heatIn - k*(T - ambient), k in 1/min.
+# The fan and an open door both raise k; the heated bed is the only heat source.
+# Tuned so the fake print actually walks through the phases: the chamber crosses
+# its target about half a minute in, settles near 50 C with the fan off, and can
+# be pulled back to the low forties by the thermostat.
+K_BASE, K_FAN, K_DOOR = 0.25, 0.55, 0.60
+CHAMBER_HEAT_C_PER_SEC = 0.20
 
 
 class Sim:
@@ -281,6 +322,15 @@ class Sim:
         self.phase_t = 0.0
         self.nozzle, self.bed, self.chamber = 24.0, 23.5, 24.0
         self.n_target = self.b_target = 0.0
+        self.c_target = 0.0                    # printer's own chamber set point (0 = none)
+        # door (home_flag bit 23 - the front-door plunger switch; there is no lid
+        # sensor). doorKnown stays false until an EDGE is seen, because on some
+        # X1C units the bit is stuck at "open" for the whole session.
+        self.door_open = bool(getattr(args, "door", False))
+        self.door_known = False
+        self.door_edges = 0
+        self.last_door_open = 0.0
+        self.last_door_close = 0.0
         self.progress = 0.0
         self.layer = 0
         self.total_layers = 210
@@ -295,6 +345,18 @@ class Sim:
         self.manual_expires = 0.0
         self.kick_until = 0.0
         self.print_end_at = 0.0
+        self.setpoint = None
+        self.pi_integral = 0.0
+        self.pi_setpoint = None
+        self.pi_last = 0.0
+        self.pi_out = 0.0
+        self.door_rule_until = 0.0             # doorResumeSec anti-flap deadline
+        # cooling-rate learning (spec 15.4)
+        self.win = None                        # dict(start, t0, last, tlast, out, door)
+        self.rate_c_per_min = None
+        self.k_closed = [None] * 5
+        self.k_open = [None] * 5
+        self.k_samples = 0
         self.last_tick = time.monotonic()
         # wifi scan state
         self.scan_started = 0.0
@@ -306,8 +368,58 @@ class Sim:
     def state_name(self):
         return SCENARIO[self.phase_i][0]
 
+    def stage(self):
+        return SCENARIO[self.phase_i][2]
+
+    def phase(self):
+        """Mirrors reportPhase() in printer_parse.h - first rule that matches."""
+        if not self.printer_connected or not self.ever_updated:
+            return "offline"
+        gs, stage = self.state_name(), self.stage()
+        if gs == "PAUSE" or stage in PAUSE_STAGES:
+            return "paused"
+        warming = gs == "RUNNING" and (
+            (self.b_target > 0 and self.bed < self.b_target - 3) or
+            (self.c_target > 0 and self.chamber < self.c_target - 2))
+        if stage in PREHEAT_STAGES or warming:
+            return "preheat"
+        if stage in COOLING_STAGES:
+            return "cooling"
+        if gs in ("RUNNING", "PREPARE", "SLICING"):
+            return "printing"
+        if gs == "FINISH":
+            return "finished"
+        if gs == "FAILED":
+            return "failed"
+        return "idle"
+
     def printing(self):
-        return self.state_name() in ("RUNNING", "PAUSE", "PREPARE", "SLICING")
+        """spec 15.1: onlyWhilePrinting gates on the phase, not on gcode_state."""
+        return self.phase() in ("preheat", "printing", "paused")
+
+    # ---------------- door ----------------
+    def door(self):
+        """The door state the control logic may act on: closed until an edge has
+        proved the switch reports at all (spec 15.1)."""
+        return self.door_known and self.door_open
+
+    def set_door(self, want_open):
+        """A door change is an edge, and the first edge is what makes the state
+        trustworthy. The initial state (including --door) is not an edge."""
+        want_open = bool(want_open)
+        if want_open == self.door_open:
+            return False
+        now = time.monotonic()
+        self.door_open = want_open
+        self.door_known = True
+        self.door_edges += 1
+        if want_open:
+            self.last_door_open = now
+        else:
+            self.last_door_close = now
+            self.door_rule_until = now + self.cfg["fan"]["doorResumeSec"]
+        BUS.log("I", "door %s" % ("opened" if want_open else "closed"))
+        return True
 
     def _approach(self, cur, tgt, rate, dt):
         if tgt is None:
@@ -326,7 +438,7 @@ class Sim:
         self.last_update = time.monotonic()
         self.ever_updated = True
         self.phase_t += dt
-        name, dur = SCENARIO[self.phase_i]
+        name, dur, _stage = SCENARIO[self.phase_i]
         if self.phase_t >= dur:
             self.phase_t = 0.0
             self.phase_i = (self.phase_i + 1) % len(SCENARIO)
@@ -338,22 +450,33 @@ class Sim:
                 self.progress, self.layer = 100.0, self.total_layers
                 self.print_end_at = time.monotonic()
         if name == "PREPARE":
-            self.n_target, self.b_target = 220.0, 60.0
+            self.n_target, self.b_target, self.c_target = 220.0, 100.0, 32.0
         elif name == "RUNNING":
-            self.n_target, self.b_target = 220.0, 60.0
+            self.n_target, self.b_target, self.c_target = 220.0, 100.0, 32.0
             frac = self.phase_t / dur
             self.progress = clamp(frac * 100.0, 0, 100)
             self.layer = int(self.progress / 100.0 * self.total_layers)
         else:
-            self.n_target, self.b_target = 0.0, 0.0
+            self.n_target, self.b_target, self.c_target = 0.0, 0.0, 0.0
         self.nozzle = self._approach(self.nozzle, self.n_target if self.n_target else 24.0,
                                      9.0 if self.n_target else 2.0, dt)
         self.nozzle += random.uniform(-0.25, 0.25)
+        # A deliberately slow bed, so the "RUNNING but still below target" branch
+        # of the preheat rule is actually visible in the UI.
         self.bed = self._approach(self.bed, self.b_target if self.b_target else 23.5,
                                   1.2 if self.b_target else 0.35, dt)
         self.bed += random.uniform(-0.08, 0.08)
-        ctarget = 42.0 if name == "RUNNING" else 25.0
-        self.chamber = self._approach(self.chamber, ctarget, 0.35, dt)
+        self.tick_chamber(dt)
+
+    def tick_chamber(self, dt):
+        """Newtonian model: the bed heats the chamber, the fan and an open door
+        carry the heat away. This is what makes the thermostat worth testing."""
+        amb = float(self.cfg["fan"]["ambientTemp"])
+        out = getattr(self, "effective_output", self.output)
+        k = K_BASE + K_FAN * clamp(out, 0, 100) / 100.0 + (K_DOOR if self.door() else 0.0)
+        heat = CHAMBER_HEAT_C_PER_SEC if self.b_target > 0 else 0.0
+        self.chamber += (heat - k / 60.0 * (self.chamber - amb)) * dt
+        self.chamber = clamp(self.chamber, amb - 1.0, 70.0)
 
     def remaining_min(self):
         if self.state_name() != "RUNNING":
@@ -374,7 +497,7 @@ class Sim:
         if not (self.printer_connected and self.ever_updated):
             return unknown
         name = self.state_name()
-        stage = 0 if name == "RUNNING" else (2 if name == "PREPARE" else -1)
+        stage = self.stage()
         if name == "IDLE":                     # nothing loaded -> no job counters
             return dict(unknown, stage=stage, stageText=STAGES.get(stage, "idle"))
         return {"stage": stage, "stageText": STAGES.get(stage, "idle"),
@@ -384,10 +507,12 @@ class Sim:
     def temps(self):
         if not self.printer_connected:
             return {"nozzle": None, "nozzleTarget": None, "bed": None,
-                    "bedTarget": None, "chamber": None}
+                    "bedTarget": None, "chamber": None, "chamberTarget": None}
         return {"nozzle": round(self.nozzle, 1), "nozzleTarget": round(self.n_target),
                 "bed": round(self.bed, 1), "bedTarget": round(self.b_target),
-                "chamber": round(self.chamber, 1)}
+                "chamber": round(self.chamber, 1),
+                # null rather than 0 when the printer has no chamber heater
+                "chamberTarget": round(self.c_target) if self.c_target else None}
 
     def source_temp(self):
         t = self.temps()
@@ -413,6 +538,30 @@ class Sim:
             f["mode"] = "auto"
             BUS.log("I", "manual override expired -> auto")
 
+        phase = self.phase()
+        recent_print = (not self.printing() and self.print_end_at
+                        and now - self.print_end_at < f["cooldownMin"] * 60)
+        chamber_cool = self.chamber <= f["cooldownTarget"]
+
+        # 3. door: nothing to exhaust while the printer is open, and the
+        #    rule stays armed for doorResumeSec after it closes. During a
+        #    cool-down an open door helps, so the rule is skipped there.
+        door_active = self.door() or (self.door_known and now < self.door_rule_until)
+        door_rule = (f["doorMode"] != "ignore" and self.door_known and door_active
+                     and phase not in ("finished", "cooling", "idle"))
+        # 4. preheat: the fan would be fighting the heaters.
+        preheat_rule = f["preheatMode"] != "ignore" and phase == "preheat"
+
+        # 5. chamber thermostat
+        thermostat = f["mode"] == "chamber" and st is not None and self.chamber is not None
+        cooling_phase = phase in ("finished", "cooling") or (phase == "idle" and recent_print)
+        sp = None
+        if thermostat:
+            if phase in ("preheat", "printing", "paused"):
+                sp = float(f["chamberTarget"])
+            elif cooling_phase:
+                sp = float(f["cooldownTarget"])
+
         if f["mode"] == "off":
             mode, tgt = "off", 0.0
         elif f["mode"] == "manual":
@@ -421,9 +570,20 @@ class Sim:
             mode = "stale"
             sm = f["staleMode"]
             tgt = self.output if sm == "hold" else (float(f["staleSpeed"]) if sm == "fixed" else 0.0)
+        elif door_rule:
+            mode = "door"
+            tgt = float(f["doorSpeed"]) if f["doorMode"] == "fixed" else 0.0
+        elif preheat_rule:
+            mode = "preheat"
+            tgt = float(f["preheatSpeed"]) if f["preheatMode"] == "fixed" else 0.0
+        elif thermostat and sp is None:
+            mode, tgt = "idle", 0.0
+        elif thermostat:
+            mode = "cooldown" if cooling_phase else "chamber"
+            tgt = self._thermostat(sp, f, now)
         elif f["onlyWhilePrinting"] and not self.printing():
-            cd_left = (self.print_end_at + f["cooldownMin"] * 60) - now
-            if cd_left > 0:
+            # the window ends at cooldownTarget or cooldownMin, whichever first
+            if recent_print and not chamber_cool:
                 mode = "cooldown"
                 tgt = self._curve_target(st, f)
             else:
@@ -431,6 +591,9 @@ class Sim:
         else:
             mode, tgt = "auto", self._curve_target(st, f)
 
+        if mode not in ("chamber", "cooldown") or sp is None:
+            self.pi_integral, self.pi_setpoint, self.pi_out, self.pi_last = 0.0, None, 0.0, 0.0
+        self.setpoint = sp if mode in ("chamber", "cooldown") and sp is not None else None
         self.eff_mode = mode
         self.target = clamp(tgt, 0, 100)
         out = self.target
@@ -447,6 +610,71 @@ class Sim:
         if now < self.kick_until and eff > 0:
             eff = 100.0
         self.effective_output = eff
+
+    def _thermostat(self, sp, f, now):
+        """Same PI step as thermostat.h: anti-windup clamp plus conditional
+        integration, frozen while the door is open or the output is saturated."""
+        if self.pi_setpoint is None or abs(sp - self.pi_setpoint) > 0.01:
+            self.pi_integral, self.pi_setpoint, self.pi_last = 0.0, sp, 0.0
+        period = f["thermostatPeriodSec"]
+        if self.pi_last and now - self.pi_last < period:
+            return self.pi_out
+        dt = period if not self.pi_last else now - self.pi_last
+        self.pi_last = now
+        kp, ki = float(f["kp"]), float(f["ki"])
+        e = self.chamber - sp
+        integral = self.pi_integral
+        if ki > 0 and dt > 0 and not self.door():
+            lim = 100.0 / ki
+            nxt = clamp(integral + e * dt, -lim, lim)
+            held, trial = kp * e + ki * integral, kp * e + ki * nxt
+            if not ((held >= 100 and trial > held) or (held <= 0 and trial < held)):
+                integral = nxt
+        self.pi_integral = integral
+        self.pi_out = clamp(kp * e + ki * integral, 0.0, 100.0)
+        return self.pi_out
+
+    # ---------------- cooling-rate learning (spec 15.4) ----------------
+    MIN_WINDOW_SEC = 60.0
+
+    def tick_thermal(self, now):
+        """Passive: a window is >= 60 s of steady output, unchanged door and no
+        heater running. k = -(dT/dt)/(T - ambient), blended into the bucket."""
+        amb = float(self.cfg["fan"]["ambientTemp"])
+        out = getattr(self, "effective_output", self.output)
+        heater = self.b_target > 0 or self.n_target > 0
+        if heater or not self.printer_connected:
+            self.win, self.rate_c_per_min = None, None
+            return
+        door = self.door()          # an unproven switch counts as closed
+        w = self.win
+        if w and (abs(out - w["out"]) > 5 or door != w["door"]):
+            w = None
+        if not w:
+            self.win = {"start": now, "t0": self.chamber, "last": now,
+                        "tlast": self.chamber, "out": out, "door": door}
+            self.rate_c_per_min = None
+            return
+        w["last"], w["tlast"] = now, self.chamber
+        span = w["last"] - w["start"]
+        self.rate_c_per_min = (round((w["tlast"] - w["t0"]) / span * 60.0, 2)
+                               if span >= 20 else None)
+        if span < self.MIN_WINDOW_SEC:
+            return
+        d_t = w["tlast"] - w["t0"]
+        lift = (w["t0"] + w["tlast"]) / 2.0 - amb
+        rate = d_t / span * 60.0
+        if abs(d_t) >= 0.5 and lift >= 3.0 and rate < 0:
+            k = -rate / lift
+            bucket = int(clamp((out + 12.5) // 25, 0, 4))
+            table = self.k_open if door else self.k_closed
+            table[bucket] = k if table[bucket] is None else table[bucket] + 0.3 * (k - table[bucket])
+            self.k_samples += 1
+            BUS.log("I", "thermal: k=%.3f /min at %d%% door %s"
+                    % (k, bucket * 25, "open" if door else "closed"))
+            self.win = None
+        elif span >= self.MIN_WINDOW_SEC * 5:
+            self.win = None
 
     def _curve_target(self, st, f):
         if self.held_temp is None or abs(st - self.held_temp) >= f["hysteresis"]:
@@ -492,7 +720,11 @@ class Sim:
                     "progress": cnt["progress"], "remainingMin": cnt["remainingMin"],
                     "layer": cnt["layer"], "totalLayers": cnt["totalLayers"],
                     "task": "Benchy.3mf" if self.printer_connected else "",
-                    "doorOpen": False, "printError": 0,
+                    "phase": self.phase(),
+                    # null until an edge has proved the switch reports at all
+                    "doorOpen": self.door_open if self.door_known else None,
+                    "doorKnown": self.door_known, "doorEdgeCount": self.door_edges,
+                    "printError": 0,
                     "wifiSignal": "-45dBm" if self.printer_connected else "",
                     "temps": self.temps(),
                     "fans": {"part": out, "aux": 0, "chamber": 40, "heatbreak": 100}
@@ -501,11 +733,21 @@ class Sim:
                 },
                 "fan": {"output": out, "target": round(self.target), "mode": f["mode"],
                         "effectiveMode": self.eff_mode, "source": f["source"],
-                        "sourceTemp": self.source_temp(), "manualSpeed": f["manualSpeed"],
+                        "sourceTemp": self.source_temp(),
+                        "setpoint": self.setpoint, "chamberTarget": f["chamberTarget"],
+                        "cooldownTarget": f["cooldownTarget"],
+                        "manualSpeed": f["manualSpeed"],
                         "manualExpiresSec": max(0, int(self.manual_expires - now))
                         if self.manual_expires else 0,
                         "pwmDuty": self.pwm_duty(), "output1": f["output1"],
                         "output2": f["output2"]},
+                # NaN is never emitted: an unmeasured bucket is JSON null
+                "thermal": {"rateCPerMin": self.rate_c_per_min,
+                            "kClosed": [round(k, 3) if k is not None else None
+                                        for k in self.k_closed],
+                            "kOpen": [round(k, 3) if k is not None else None
+                                      for k in self.k_open],
+                            "samples": self.k_samples},
                 "mqttExt": {"enabled": self.cfg["mqtt"]["enabled"],
                             "connected": self.cfg["mqtt"]["enabled"] and self.mqtt_ext_connected},
             }
@@ -519,6 +761,7 @@ class Sim:
             with self.lock:
                 self.tick_printer(dt)
                 self.tick_fan(dt)
+                self.tick_thermal(now)
                 if self.cfg["mqtt"]["enabled"] and not self.mqtt_ext_connected:
                     self.mqtt_ext_connected = True
                     BUS.log("I", "external MQTT connected to %s:%d" %
@@ -715,6 +958,18 @@ class Handler(BaseHTTPRequestHandler):
                 BUS.log("I", "config restored from backup, saved")
                 BUS.log("W", "restarting now (mock: not restarting)")
                 return self._send({"ok": True})
+            if p == "/mock/door":
+                # Not part of the device API: the mock's stand-in for someone
+                # opening the printer, so the door rules can be demonstrated.
+                b = self._json_body()
+                with sim.lock:
+                    want = (not sim.door_open) if b.get("toggle") else bool(b.get("open"))
+                    changed = sim.set_door(want)
+                    st = sim.status()["printer"]
+                return self._send({"ok": True, "changed": changed,
+                                   "doorOpen": st["doorOpen"],
+                                   "doorKnown": st["doorKnown"],
+                                   "doorEdgeCount": st["doorEdgeCount"]})
             if p in ("/api/update", "/update"):
                 return self._ota()
             if p == "/submitOptions":         # legacy 1.x form route
@@ -793,8 +1048,8 @@ class Handler(BaseHTTPRequestHandler):
         sim = self.server.sim
         b = self._json_body()
         mode = b.get("mode")
-        if mode not in (None, "auto", "manual", "off"):
-            return self._err("mode must be auto, manual or off")
+        if mode not in (None, "auto", "chamber", "manual", "off"):
+            return self._err("mode must be auto, chamber, manual or off")
         speed = b.get("speed")
         dur = int(b.get("durationSec") or 0)
         with sim.lock:
@@ -974,6 +1229,8 @@ def main():
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--ap", action="store_true", help="simulate AP / provisioning mode")
     ap.add_argument("--offline", action="store_true", help="printer never connects")
+    ap.add_argument("--door", action="store_true",
+                    help="start with the door reported open (POST /mock/door toggles it)")
     ap.add_argument("--auth", default="", metavar="USER:PASS", help="require basic auth")
     args = ap.parse_args()
 
@@ -989,6 +1246,7 @@ def main():
     srv.sim, srv.args = sim, args
     threading.Thread(target=sim.run, daemon=True).start()
     modes = [m for m, on in (("AP", args.ap), ("offline-printer", args.offline),
+                             ("door-open", args.door),
                              ("auth", bool(args.auth))) if on] or ["normal"]
     print("BLSmartFlow mock API on http://localhost:%d/  (%s)  serving %s  — Ctrl-C to stop"
           % (args.port, ", ".join(modes), os.path.relpath(INDEX, os.getcwd())), flush=True)

@@ -1,6 +1,6 @@
 {
   "name": "BLSmartFlow",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "new_install_prompt_erase": true,
   "allow_custom_firmware_upload": true,
   "builds": [
@@ -8,7 +8,7 @@
       "chipFamily": "ESP32",
       "parts": [
         {
-          "path": "esp32dev/BLSmartflow_2.0.0.bin",
+          "path": "esp32dev/BLSmartflow_2.0.1.bin",
           "offset": 0
         }
       ]

@@ -2,8 +2,10 @@
 
 BLSmartFlow is a small ESP32 board that drives one or two fans from your Bambu Lab printer's
 temperatures. It reads the printer over the printer's own local MQTT link, looks the temperature up
-in a curve you draw in your browser, and sets the fan speed. Everything is configured from a web
-page on the device itself — no app, no cloud account.
+in a curve you draw in your browser, and sets the fan speed. It can also work the other way round —
+hold the enclosure at a temperature you pick and adjust the fan until it gets there — and it knows
+to leave the fan alone while the printer is warming up or the door is open. Everything is configured
+from a web page on the device itself — no app, no cloud account.
 
 This guide assumes you have never flashed an ESP32 before. Follow it top to bottom.
 
@@ -14,13 +16,15 @@ This guide assumes you have never flashed an ESP32 before. Follow it top to bott
 | [3. First-time setup over the setup network](#3-first-time-setup-over-the-setup-network) | captive portal, WiFi credentials |
 | [4. Connecting the printer](#4-connecting-the-printer) | IP, access code, serial, connection test |
 | [5. Shaping the fan curve](#5-shaping-the-fan-curve) | points, presets, source, behaviour, safety |
-| [6. Manual override](#6-manual-override) | take control from the dashboard |
-| [7. Home Assistant in five minutes](#7-home-assistant-in-five-minutes) | broker, discovery, entities |
-| [8. Updating the firmware](#8-updating-the-firmware) | OTA from the System page |
-| [9. Backup, restore, restart, factory reset, login](#9-backup-restore-restart-factory-reset-login) | maintenance |
-| [10. The status LED](#10-the-status-led) | what the blinks mean |
-| [11. Troubleshooting](#11-troubleshooting) | symptom → cause → fix |
-| [12. Serial provisioning (the fallback)](#12-serial-provisioning-the-fallback) | when the browser route fails |
+| [6. Door and print phases](#6-door-and-print-phases) | rules that watch what the printer is *doing* |
+| [7. Chamber thermostat mode](#7-chamber-thermostat-mode) | hold the enclosure at a temperature |
+| [8. Manual override](#8-manual-override) | take control from the dashboard |
+| [9. Home Assistant in five minutes](#9-home-assistant-in-five-minutes) | broker, discovery, entities |
+| [10. Updating the firmware](#10-updating-the-firmware) | OTA from the System page |
+| [11. Backup, restore, restart, factory reset, login](#11-backup-restore-restart-factory-reset-login) | maintenance |
+| [12. The status LED](#12-the-status-led) | what the blinks mean |
+| [13. Troubleshooting](#13-troubleshooting) | symptom → cause → fix |
+| [14. Serial provisioning (the fallback)](#14-serial-provisioning-the-fallback) | when the browser route fails |
 
 ---
 
@@ -234,8 +238,24 @@ A preset only fills the editor; you still have to save it.
 |---|---|
 | **Stale after** (s) | If no report arrives from the printer for this long, the temperature is treated as unusable. Default 120 s, range 10–3600 s. |
 | **When data is stale** | **Off** stops the fan (safest for part cooling), **Hold** keeps the last speed (good when the fan cools electronics), **Fixed** runs at the speed you set below (good for chamber venting you never want to stop). |
-| **Only while printing** | The curve runs only while the printer reports `RUNNING`, `PAUSE`, `PREPARE` or `SLICING`. Outside a print the fan switches off once the cooldown has elapsed. |
-| **Cooldown** (min) | How long the curve keeps running after the print finishes, so a hot nozzle or chamber is still cooled. Default 10 minutes, range 0–1440. Only used when *Only while printing* is on. |
+| **Only while printing** | The curve runs only while a job is actually going — preheating, printing or paused (see [Section 6](#6-door-and-print-phases)). Outside a print the fan switches off once the cooldown has elapsed. |
+| **Cooldown** (min) | How long the curve keeps running after the print finishes, so a hot nozzle or chamber is still cooled. Default 10 minutes, range 0–1440. Only used when *Only while printing* is on. The window also ends early once the chamber reaches the **Cool-down target** — whichever comes first. |
+
+### Fan mode
+
+The **Fan mode** card at the top of the page picks what drives the fan at all:
+
+| Mode | What it does |
+|---|---|
+| **Curve** | The fan follows the curve on this page, using the source temperature you picked. |
+| **Chamber thermostat** | The fan is adjusted until the chamber sits at a temperature you set — see [Section 7](#7-chamber-thermostat-mode). The curve is ignored. |
+| **Manual** | One fixed speed from the dashboard; every temperature is ignored. |
+| **Off** | Both outputs held at 0 %. |
+
+The mode applies the moment you click it — it does not wait in the save bar. The badge in the corner
+of the card (*now: …*) shows what the controller is **actually** doing, which can differ from the
+mode you picked: a door rule, a preheat rule, the stale-data failsafe or the idle gate all take
+priority.
 
 ### Outputs
 
@@ -246,7 +266,196 @@ says 0 %.
 
 ---
 
-## 6. Manual override
+## 6. Door and print phases
+
+A curve only knows how hot something is. It cannot know that you have just opened the printer, or
+that the bed is still climbing to temperature — and in both of those situations the *right* fan
+speed has nothing to do with the reading. The **Printer state rules** card on the Fan curve page
+covers exactly those two cases.
+
+### What the printer tells us
+
+Two things arrive over the printer's MQTT link:
+
+* **The front-door switch.** A small plunger switch on the door edge. **The top lid has no sensor at
+  all**, so lifting it is invisible to everything in this section.
+* **A stage number**, which the device turns into a **phase** — the one word that best describes what
+  the printer is doing. You will see it as a chip on the dashboard:
+
+| Chip | What it means |
+|---|---|
+| **Idle** | The printer is on, but there is no job running. |
+| **Preheating** | The bed, hotend or chamber is still coming up to temperature. |
+| **Printing** | The job is running at temperature. |
+| **Paused** | The job is suspended — by you, by a filament runout, or by an error. |
+| **Cooling** | The printer is deliberately shedding heat (cooling the chamber, the bed or the nozzle). |
+| **Finished – cooling** | The print is done and the chamber is still being emptied of heat. |
+| **Failed** | The print stopped with an error. |
+| **Offline** | Nothing has been heard from the printer. |
+
+"Preheating" is a little cleverer than the printer's own state: even when the printer already calls
+itself *running*, the device treats it as a preheat while the bed is more than 3 °C below its target
+or the chamber is more than 2 °C below its own. That is the window in which a fan does the most harm.
+
+### Does your printer report the door at all?
+
+Not every X1C does. On some units the closed door never quite presses the switch, so the printer
+reports "open" from the moment it powers on and never changes. A fan rule built on that would sit
+switched off for every print.
+
+So the device does not believe the bit until it has seen it **change**. Until then:
+
+* the dashboard shows a muted **Door: not reported** chip,
+* the door is treated as **closed**, and
+* the door rule below does nothing at all.
+
+**Open and close the front door once** while the device is connected. If the chip turns into *Door
+open* / *Door closed*, your printer reports properly and the rule is live from then on. If it stays
+*not reported*, yours is one of the affected units — nothing here will work, and there is nothing to
+be done about it from this end.
+
+### The door rule
+
+| Setting | What it does |
+|---|---|
+| **Door open** | *Ignore* (the old behaviour), *Stop the fan*, or *Fixed speed*. |
+| **Speed** | Used only by *Fixed speed*. |
+| **Resume delay** | How long the rule stays in force after the door closes. |
+
+**Why you would want it.** With the printer open there is nothing to exhaust. The fan just pulls
+room air — and the dust in it — straight through the machine, and on a heated-chamber print it throws
+away the warmth you were holding. *Stop the fan* is the usual answer; *Fixed speed* at 10–20 % is
+worth it if you want fumes to keep drifting towards a filter while you lean in.
+
+**Why the resume delay.** Fitting a part or swapping filament means opening and shutting the door
+several times in a minute. Without a delay the fan would stutter on and off through the whole
+operation. Five seconds is plenty.
+
+**One deliberate exception:** after a print, an open door *helps* the chamber cool down. So the rule
+is skipped entirely during the *Finished – cooling*, *Cooling* and *Idle* phases — open the door and
+the fan keeps running, which is exactly what you want.
+
+### The preheat rule
+
+| Setting | What it does |
+|---|---|
+| **While preheating** | *Ignore*, *Stop the fan* (the default), or *Fixed speed*. |
+| **Speed** | Used only by *Fixed speed*. |
+
+**Why you would want it.** An exhaust fan running during warm-up is fighting the heaters. The print
+starts later, it costs more power, and on an enclosed printer the chamber may never reach its target
+at all. Stopping the fan until the printer is at temperature costs you nothing — there is no heat to
+remove yet.
+
+Both rules sit **above** the curve and above the thermostat: while one of them applies it decides the
+output, whatever the temperature says. They are skipped in Manual and Off mode. The chip in the
+corner of the **Fan mode** card (*now: …*) always tells you which rule is actually in charge.
+
+---
+
+## 7. Chamber thermostat mode
+
+Pick **Chamber thermostat** in the **Fan mode** card at the top of the Fan curve page.
+
+A curve can only guess. You tell it "50 % at 45 °C" and hope that is enough airflow — but the right
+number depends on the room, the filament, the print and where the fan is mounted, and it changes as
+the print goes on. A thermostat does not guess: it measures the chamber, compares it with the
+temperature you asked for, and adjusts until it gets there.
+
+That matters most for ABS and ASA, where the chamber temperature is the difference between a part
+that holds together and one that splits along the layer lines — and where too *little* airflow slowly
+bakes the electronics and the filament sitting in the AMS.
+
+> This mode needs a printer that reports a chamber temperature (X1- and H2D-style machines). On a
+> printer without one, the device quietly falls back to the curve rather than running blind — you
+> will see the mode chip say *Automatic* even though *Chamber thermostat* is selected.
+
+### The two temperatures you set
+
+| Setting | What it does | Typical |
+|---|---|---|
+| **Chamber target** | Held while a print is running. | 45–50 °C for ABS/ASA, 35–40 °C for PETG, as cool as the room for PLA |
+| **Cool-down target** | After the print, the fan keeps going until the chamber has dropped this far. | 35 °C — cool enough to open the printer and lift the part off |
+
+The cool-down target does double duty: in plain **Curve** mode with *Only while printing* switched
+on, it also ends the cool-down window early, so the fan stops as soon as the chamber is actually
+cold instead of running out its full timer.
+
+### The dashboard while it runs
+
+The **Fan output** card gains a *set point* badge showing the temperature being held and how far off
+the chamber currently is — `set point 45.0 °C (+1.8)` means the chamber is 1.8 °C too hot and the fan
+is being asked for more. The **Thermal** card shows the same numbers side by side.
+
+### Advanced: Kp and Ki
+
+Hidden behind *Advanced: controller gains*, and best left alone. Open them only if the fan **hunts**
+(surges up and down instead of settling) or takes **far too long** to react.
+
+| Gain | Meaning | If the fan hunts | If it reacts too slowly |
+|---|---|---|---|
+| **Kp** (%/°C) | How much fan you get per degree above target. At the default 8, being 5 °C too hot asks for 40 % fan. | Lower it | Raise it |
+| **Ki** (%/°C·s) | Slowly builds output while a small error refuses to go away — it is what removes the last degree. | Lower it | Raise it a little |
+
+**Update period** is how often the thermostat recalculates (5 s by default). An enclosure takes
+minutes to respond, so running faster gains nothing and only invites the fan to chase sensor noise.
+
+Two safeguards are built in and need no configuration: the accumulated correction is capped so it can
+never demand more than full speed, and it is **frozen while the door is open or the fan is already
+flat out**. Without that freeze, holding the door open for two minutes would leave the fan roaring
+for several minutes after you shut it again.
+
+<details>
+<summary><b>How the cooling-rate numbers are learned</b></summary>
+
+The **Thermal** card on the dashboard shows a live rate in °C per minute, and behind *Learned cooling
+rates* a small table of numbers called **k**. Nothing on this page changes how the fan behaves — it
+is measurement, not control. It is there so you can answer "if I set the fan to 50 % and shut the
+door, how long until I can open the printer?".
+
+**Where the numbers come from.** A warm box loses heat at a rate proportional to how much warmer it
+is than the room. That is Newton's law of cooling, and it has exactly one unknown:
+
+```
+temperature drop per minute  =  k × (chamber − room temperature)
+```
+
+So `k` (in 1/min) is the whole story of how well your setup sheds heat, and it depends almost
+entirely on two things: how hard the fan is blowing, and whether the printer is open. Hence one
+number per fan setting (0, 25, 50, 75, 100 %), twice: door closed and door open.
+
+**How they are measured.** The device watches the chamber every five seconds and waits for a stretch
+of at least a minute in which
+
+* the fan output has not moved by more than 5 %,
+* the door has not been opened or closed, and
+* **no heater is running** — the bed and hotend targets are both zero.
+
+That last condition is the important one: while the printer is heating, the slope says far more about
+the bed than about your fan. In practice the numbers come from the minutes after a print, which is
+also exactly when you care about them.
+
+Each usable stretch produces one `k`, which is blended into the table with a 30 % weight, so the
+figures settle down over a few prints rather than jumping around after every measurement. Stretches
+are thrown away when the chamber moved less than half a degree, when it is within 3 °C of the room
+(the arithmetic divides by that gap, so noise would be magnified into nonsense), or when the chamber
+was warming rather than cooling.
+
+**Reading the table.** Bigger `k` means faster cooling. A dash means that combination has simply not
+happened yet — run a print with the fan at that speed and it will fill in. The count next to the
+heading is how many measurements have gone in so far. The table is saved on the device (at most once
+every ten minutes, to be kind to the flash) and travels with a backup, so it survives reboots and
+firmware updates.
+
+**One thing to check:** *Room temperature* on the Chamber thermostat card. The device has no room
+sensor, so it uses the number you type there. It has no effect on the fan, but a wrong value skews
+every `k` in the table.
+
+</details>
+
+---
+
+## 8. Manual override
 
 The **Manual override** card on the dashboard takes the fan away from the curve.
 
@@ -272,7 +481,7 @@ On a phone the same controls sit in a single column with the navigation as a bot
 
 ---
 
-## 7. Home Assistant in five minutes
+## 9. Home Assistant in five minutes
 
 The device can talk to your own MQTT broker (the Mosquitto add-on, for example) and announce itself
 to Home Assistant automatically. This is completely separate from the printer link.
@@ -297,13 +506,16 @@ What you get:
 | Entity | Type | What it does |
 |---|---|---|
 | Fan | `fan` | On/off and a percentage — this is the manual override. |
-| Mode | `select` | `auto` / `manual` / `off`. |
+| Mode | `select` | `auto` / `chamber` / `manual` / `off`. |
+| Chamber target, Cool-down target | `number` | The two thermostat set points, 20–80 °C and 15–60 °C. Changing them here changes them on the device. |
 | Nozzle / Bed / Chamber temperature | `sensor` | °C, from the printer. Shows *Unknown* when the printer does not report it. |
 | Fan output | `sensor` | The device's own fan output, in %. |
 | Printer state, Printer stage | `sensor` | e.g. `RUNNING`, `heatbed_preheating`. |
+| Print phase | `sensor` | `preheat`, `printing`, `paused`, `cooling`, `finished`, `idle`, … — the phase the fan rules act on. Handy as an automation trigger. |
+| Cooling rate | `sensor` | How fast the chamber is changing, in °C/min (negative while cooling). *Unknown* when nothing is being measured. |
 | Print progress, Remaining time | `sensor` | % and minutes. |
 | Printer WiFi, Device RSSI, Uptime | `sensor` | Diagnostics. |
-| Printer online, Door, Printing | `binary_sensor` | Connectivity, door open, print running. |
+| Printer online, Door, Printing | `binary_sensor` | Connectivity, front door open, print running. *Door* shows **Unknown** on printers that never report a door change. |
 | Restart | `button` | Reboots the device. |
 
 > **Details.** Turning discovery off again publishes empty discovery messages, which removes the
@@ -317,7 +529,7 @@ You do not need Home Assistant to use MQTT: the same status document is publishe
 
 ---
 
-## 8. Updating the firmware
+## 10. Updating the firmware
 
 ![The System page with device info, firmware update, backup, web access and maintenance cards](img/ui-system.png)
 
@@ -334,7 +546,7 @@ You do not need Home Assistant to use MQTT: the same status document is publishe
 
 ---
 
-## 9. Backup, restore, restart, factory reset, login
+## 11. Backup, restore, restart, factory reset, login
 
 All of these live on the **System** page.
 
@@ -359,11 +571,11 @@ capitals to unlock the button. Everything goes: WiFi, printer details, curve, MQ
 > trusted LAN, nothing more. Requests that arrive over the **setup network** are never asked for a
 > password, so a device you can reach on its own hotspot is a way back in. If you forget the password
 > and the device is happily on your WiFi (so the setup network is not running), the way back is the
-> serial command `{"cmd":"factoryreset"}` over USB — see [section 12](#12-serial-provisioning-the-fallback).
+> serial command `{"cmd":"factoryreset"}` over USB — see [section 12](#14-serial-provisioning-the-fallback).
 
 ---
 
-## 10. The status LED
+## 12. The status LED
 
 The LED on GPIO 21 shows the most important problem first: WiFi beats the printer link, and the
 printer link beats stale data.
@@ -379,7 +591,7 @@ printer link beats stale data.
 
 ---
 
-## 11. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -388,6 +600,10 @@ printer link beats stale data.
 | The phone leaves the setup network after a few seconds | "No internet" auto-switching | Android: choose *Stay connected* and/or turn mobile data off. iOS: use the login sheet, never *Cancel* |
 | Saved WiFi, device never connects | 5 GHz-only network, or a wrong password | The ESP32 is 2.4 GHz only. Re-enter the password; the setup network comes back 90 s after the failure begins |
 | Slow to come back after a router reboot | The device retries with a growing back-off (5 s, 10 s, 30 s, then 60 s), 20 s per attempt | Nothing to do; it will reconnect. If it was locked to one access point, the lock is dropped automatically after three failed cycles |
+| The dashboard says **Door: not reported** | The printer has never been seen to report the door *changing*, so the bit cannot be trusted — on some X1C units a closed door never presses the switch and it reads "open" forever | Open and close the front door once. If the chip still does not move, yours is one of those units: the door rule stays inert, which is deliberate. Lifting the **top lid** never shows here — it has no sensor |
+| Chamber thermostat selected, but the chip says *Automatic* | The printer reports no chamber temperature, so the thermostat has nothing to control and falls back to the curve | Use Curve mode with the nozzle or bed as the source; only X1- and H2D-style machines have a chamber sensor |
+| The fan never runs during a print | *While preheating* is set to *Stop the fan* and the printer is still shown as **Preheating** — usually a bed or chamber that has not reached target | Wait, or check the phase chip on the dashboard. The bed must be within 3 °C of its target (the chamber within 2 °C) before the phase becomes *Printing* |
+| **Learned cooling rates** stays empty | Nothing has been measured yet: it needs a minute of steady fan output with the door still and **both heaters off**, which in practice means after a print | Let one print finish and idle for a few minutes. Check *Room temperature* on the Chamber thermostat card is roughly right |
 | Was fine, now the open setup network is broadcasting | The WiFi has been unreachable for 90 s or more; the device raises the setup network while it keeps retrying | Fix the WiFi. Once the device rejoins, the setup network closes 5 minutes later on its own |
 | `http://blsmartflow.local/` does not load | mDNS is not resolved by every Windows and Android setup | Use the device's IP address from your router. The hostname is also on the Network page under *Current connection* |
 | "access code must be exactly 8 characters" | The LAN access code is 8 characters, always | Re-read it from the printer's *LAN Only Mode* screen |
@@ -403,7 +619,7 @@ printer link beats stale data.
 
 ---
 
-## 12. Serial provisioning (the fallback)
+## 14. Serial provisioning (the fallback)
 
 If the browser route fails — no WiFi at all, a forgotten password, or a device you want to
 pre-configure on the bench — you can talk to the module over USB.

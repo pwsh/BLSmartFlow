@@ -38,8 +38,9 @@ struct PrinterState : PrinterReport {
 struct FanState {
     float    output;             // percent actually driven (post ramp/clamp)
     float    target;             // percent requested by the active mode
-    char     effectiveMode[10];  // off/manual/stale/idle/cooldown/auto
+    char     effectiveMode[10];  // off/manual/stale/idle/cooldown/auto/door/preheat/chamber
     float    sourceTemp;         // NaN when the configured source is unavailable
+    float    setpoint;           // thermostat set point, NaN unless in chamber mode
     uint16_t pwmDuty;            // 0..255 written to LEDC
     uint32_t manualExpiresAt;    // millis() deadline, 0 = no expiry
     bool     kicking;            // kick-start pulse in progress
@@ -70,8 +71,21 @@ void     fanCommitControl(const FanState& s);
 // Patches only the temporary-override deadline (0 = no expiry).
 void     fanSetManualExpiry(uint32_t atMs);
 
+// Print phase (REWORK-SPEC 15.1). Adds the one thing reportPhase() cannot know:
+// a link that has never delivered a report is Offline, whatever the stale
+// gcode_state in the snapshot still says.
+inline Phase printerPhase(const PrinterState& s)
+{
+    if (!s.everUpdated) return Phase::Offline;
+    return reportPhase(s);
+}
+
+// The door state the fan logic acts on: closed until an edge has proved that the
+// printer's door switch actually reports (see printer_parse.h).
+inline bool printerDoorOpen(const PrinterState& s) { return reportDoorOpen(s); }
+
 // True when the printer is actively working (used by onlyWhilePrinting).
-inline bool printerIsPrinting(const PrinterState& s) { return reportIsPrinting(s); }
+inline bool printerIsPrinting(const PrinterState& s) { return phaseIsPrinting(printerPhase(s)); }
 // Age of the newest accepted report in milliseconds; UINT32_MAX if never.
 uint32_t printerDataAgeMs(const PrinterState& s);
 

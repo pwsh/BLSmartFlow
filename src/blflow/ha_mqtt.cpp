@@ -144,6 +144,28 @@ void discoverBinary(const char* objectId, const char* name, const char* valueTem
     publishDiscovery("binary_sensor", objectId, doc, remove);
 }
 
+// A writable set point. HA number entities need a command topic of their own,
+// so each target gets `<base>/<id>/set` alongside the combined `target/set`.
+void discoverNumber(const char* objectId, const char* name, const char* commandSuffix,
+                    const char* valueTemplate, int min, int max, const char* icon, bool remove)
+{
+    JsonDocument doc;
+    if (!remove) {
+        doc["name"] = name;
+        doc["command_topic"] = topic(commandSuffix);
+        doc["state_topic"] = topic("state");
+        doc["value_template"] = valueTemplate;
+        doc["min"] = min;
+        doc["max"] = max;
+        doc["step"] = 1;
+        doc["mode"] = "box";
+        doc["unit_of_measurement"] = "\u00b0C";
+        doc["device_class"] = "temperature";
+        if (icon) doc["icon"] = icon;
+    }
+    publishDiscovery("number", objectId, doc, remove);
+}
+
 void publishDiscoveryAll(bool remove)
 {
     {
@@ -169,6 +191,7 @@ void publishDiscoveryAll(bool remove)
             doc["state_topic"] = topic("mode");
             JsonArray opts = doc["options"].to<JsonArray>();
             opts.add("auto");
+            opts.add("chamber");
             opts.add("manual");
             opts.add("off");
         }
@@ -203,8 +226,24 @@ void publishDiscoveryAll(bool remove)
     discoverSensor("device_rssi",   "Device RSSI",         "{{ value_json.wifi.rssi }}",             "dBm", "signal_strength", "measurement", nullptr, remove);
     discoverSensor("uptime",        "Uptime",              "{{ value_json.device.uptimeSec }}",      "s",   "duration",    "total_increasing", nullptr, remove);
 
+    const String coolingT = nullableTemplate("value_json.thermal.rateCPerMin");
+    discoverSensor("phase",        "Print phase",  "{{ value_json.printer.phase }}", nullptr, nullptr, nullptr, "mdi:state-machine", remove);
+    discoverSensor("cooling_rate", "Cooling rate", coolingT.c_str(), "\u00b0C/min", nullptr, "measurement", "mdi:thermometer-chevron-down", remove);
+
+    // Writable set points. The state comes out of the retained `state` document,
+    // which carries the configured values under fan.chamberTarget / cooldownTarget.
+    discoverNumber("chamber_target",  "Chamber target",   "chamber_target/set",
+                   "{{ value_json.fan.chamberTarget }}", 20, 80, "mdi:home-thermometer", remove);
+    discoverNumber("cooldown_target", "Cool-down target", "cooldown_target/set",
+                   "{{ value_json.fan.cooldownTarget }}", 15, 60, "mdi:snowflake-thermometer", remove);
+
     discoverBinary("printer_online", "Printer online", "{{ 'ON' if value_json.printer.online else 'OFF' }}", "connectivity", remove);
-    discoverBinary("door",           "Door",           "{{ 'ON' if value_json.printer.doorOpen else 'OFF' }}", "opening", remove);
+    // doorOpen is null until the printer has proved its door switch reports.
+    // "None" is the payload Home Assistant maps to an unknown binary state; the
+    // naive `'ON' if ... else 'OFF'` template would report a stuck door as shut.
+    discoverBinary("door",           "Door",
+                   "{% set v = value_json.printer.doorOpen %}"
+                   "{{ 'None' if v is none else ('ON' if v else 'OFF') }}", "opening", remove);
     discoverBinary("printing",       "Printing",       "{{ 'ON' if value_json.printer.printing else 'OFF' }}", "running", remove);
 }
 
@@ -333,6 +372,41 @@ void onCommand(char* rawTopic, byte* payload, unsigned int length)
         }
         configSave();          // an explicit curve change is worth a real write
         fanControlReconfigure();
+    } else if (suffix == "chamber_target" || suffix == "cooldown_target" ||
+               suffix == "chamber_target/set" || suffix == "cooldown_target/set" ||
+               suffix == "target/set") {
+        // Two shapes, because Home Assistant number entities want one topic per
+        // value while a script would rather send both at once.
+        int chamber = -1, cooldown = -1;
+        if (suffix == "target/set") {
+            if (!payload || length == 0 || length > kMaxCommandBytes) {
+                LOGW("ha: target/set payload missing or too large (%u bytes)", (unsigned)length);
+                return;
+            }
+            JsonDocument doc;
+            if (deserializeJson(doc, (const char*)payload, (size_t)length)) {
+                LOGW("ha: target/set payload is not valid json");
+                return;
+            }
+            if (doc["chamberTarget"].is<float>())  chamber = (int)doc["chamberTarget"].as<double>();
+            if (doc["cooldownTarget"].is<float>()) cooldown = (int)doc["cooldownTarget"].as<double>();
+        } else if (suffix.startsWith("chamber_target")) {
+            chamber = (int)strtof(body, nullptr);
+        } else {
+            cooldown = (int)strtof(body, nullptr);
+        }
+        if (chamber < 0 && cooldown < 0) {
+            LOGW("ha: target command carried no usable value");
+            return;
+        }
+        {
+            ConfigGuard guard;
+            // configValidate() clamps to 20..80 / 15..60, so a slider that
+            // overshoots is corrected rather than rejected.
+            if (chamber >= 0)  cfg().fan.chamberTarget = (uint8_t)(chamber > 255 ? 255 : chamber);
+            if (cooldown >= 0) cfg().fan.cooldownTarget = (uint8_t)(cooldown > 255 ? 255 : cooldown);
+        }
+        applyAndPersist();
     } else if (suffix == "restart") {
         LOGW("ha: restart requested over mqtt");
         appRequestRestart(500);
@@ -350,6 +424,9 @@ void subscribeAll()
     g_mqtt.subscribe(topic("fan/on").c_str());
     g_mqtt.subscribe(topic("mode/set").c_str());
     g_mqtt.subscribe(topic("curve/set").c_str());
+    g_mqtt.subscribe(topic("chamber_target/set").c_str());
+    g_mqtt.subscribe(topic("cooldown_target/set").c_str());
+    g_mqtt.subscribe(topic("target/set").c_str());
     g_mqtt.subscribe(topic("restart").c_str());
 }
 
