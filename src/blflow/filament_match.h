@@ -32,7 +32,7 @@ namespace blsf {
 // Where the active filament came from. `Manual` is the user telling us what is
 // loaded because the printer cannot (an external spool without RFID, a P1
 // without an AMS).
-enum class TraySource : uint8_t { None = 0, Ams = 1, External = 2, Manual = 3 };
+enum class TraySource : uint8_t { None = 0, Ams = 1, External = 2, Manual = 3, Last = 4 };  // Last = remembered from the print that just ended
 
 inline const char* traySourceName(TraySource s)
 {
@@ -40,6 +40,7 @@ inline const char* traySourceName(TraySource s)
         case TraySource::Ams:      return "ams";
         case TraySource::External: return "external";
         case TraySource::Manual:   return "manual";
+        case TraySource::Last:     return "last";
         case TraySource::None:     break;
     }
     return "none";

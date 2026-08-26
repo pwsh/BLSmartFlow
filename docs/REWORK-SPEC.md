@@ -414,3 +414,37 @@ cool-down cap for `gentle`. Tray changes take effect immediately (multi-material
 * Tests: `test/test_filament` — matcher against every row of `tools/bambu_filament_ids.csv` (must resolve to a non-empty id
   or a documented exception), the live fixture (`tray_now 0` → abs; `254` → asa), CF/GF fallbacks, support pairing,
   effective-profile derivation (PLA keepCool → 30, ABS → 50, override precedence).
+
+## 17. Post-print cool-down with the printer's fans (2.0.3)
+
+After a print the printer reports `gcode_state == FINISH` and stops issuing commands, so the device may send
+G-code (`M106 P2 S<0-255>` = auxiliary fan, `M106 P3 S<0-255>` = chamber/exhaust fan, via
+`{"print":{"sequence_id":"<n>","command":"gcode_line","param":"M106 P2 S255\nM106 P3 S255\n"}}` on
+`device/<serial>/request`). Combined with the device's own fan this cools the chamber to a target quickly.
+
+### 17.1 Config (`cooldown.*`)
+```jsonc
+"cooldown": {
+  "enabled": true,            // start a cool-down session automatically when a print finishes
+  "target": 35,               // °C chamber; when filament.auto is on the filament cooldownTarget wins (overrides apply)
+  "usePrinterFans": false,    // send M106 to the printer (opt-in: it is the only feature that commands the printer)
+  "auxSpeed": 100,            // % for M106 P2 (aux) while the session runs
+  "chamberFanSpeed": 100,     // % for M106 P3 (chamber/exhaust)
+  "maxMinutes": 30,           // hard stop
+  "gentleFromFilament": true, // materials with postPrintCooling=gentle: printer fans stay off until chamber < chamberTarget-10 and then run at half the configured %
+  "ownFan": "thermostat"      // thermostat | max | curve — how the device's own fan behaves during the session
+}
+```
+Validation: target 15..60, speeds 0..100, maxMinutes 1..240, ownFan enum.
+
+### 17.2 Session state machine (`cooldown.h/.cpp`, loop task)
+* **Start** on the phase edge → `finished` (or `cooling`) when `enabled`, or on `POST /api/cooldown {"start":true}` / MQTT `cooldown/set` `ON` at any time the printer is not printing (phase ∉ {preheat, printing, paused}). Records `startedMs`, `startChamber`, the target (effective), and the material.
+* **Run** every 5 s: if `usePrinterFans` and `gcode_state ∈ {FINISH, IDLE}` and the gentle rule allows, send/re-assert `M106 P2/P3` (re-assert every 30 s because the printer may reset fans; only when the requested value changed or 30 s elapsed). The device's own fan follows `ownFan`: `thermostat` → PI to the target (reuses the thermostat code, set point = target), `max` → 100 %, `curve` → normal curve.
+* **Stop** when chamber ≤ target (held for 2 consecutive samples), or elapsed ≥ maxMinutes, or the printer starts a new job (phase ∈ {preheat, printing, paused}) or leaves FINISH/IDLE, or the link drops for > 30 s, or `POST /api/cooldown {"start":false}` / MQTT `OFF`. On stop send `M106 P2 S0\nM106 P3 S0` **once** (only if we ever turned them on) and record `reason` ∈ {target, timeout, newJob, stopped, linkLost, disabled}.
+* Safety: never send G-code unless `gcode_state ∈ {FINISH, IDLE}` at the moment of sending; if the printer reports RUNNING/PAUSE/PREPARE the session ends immediately without sending a stop command (the print owns the fans). The command path is a small spinlock-guarded queue `printerLinkSendGcode(const char*)` drained by the printer task; publish failures are logged and retried on the next tick.
+
+### 17.3 Status / API / MQTT / UI
+* Status `"cooldown": {"active":bool,"reason":"…"|null,"target":35,"chamber":41.2,"startChamber":52,"elapsedSec":120,"maxSec":1800,"printerFans":{"aux":100,"chamber":100,"sent":true},"ownFan":"thermostat","material":"abs"|null}`.
+* `POST /api/cooldown` `{"start":true|false}` → `{"ok":true,"cooldown":{…}}` (400 `printer is busy` when a print is running). HA: `switch.cooldown` (command `cooldown/set` ON/OFF, state from `cooldown.active`), sensors `cooldown_remaining` (min) and `cooldown_reason`.
+* UI: "Post-print cool-down" card on the Fan curve page (enable, target, printer-fans toggle with an explicit warning that this sends commands to the printer, aux/chamber %, max minutes, own-fan behaviour, gentle-from-filament toggle); dashboard: when active a progress line "Cooling 52 → 35 °C, 12 min, printer fans on" with a **Stop** button, otherwise a **Cool down now** button when the printer is idle/finished. Mock: sessions run against the chamber model; `M106` commands are logged.
+* Tests: pure `cooldown_logic.h` (start/stop conditions, gentle gating, re-assert timing, reason codes) with a native suite.

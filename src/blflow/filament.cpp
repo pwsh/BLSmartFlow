@@ -2,6 +2,8 @@
 #define BLSF_FILAMENT_DB_DEFINE
 #include "filament.h"
 
+#include <Arduino.h>
+
 namespace blsf {
 
 namespace {
@@ -44,6 +46,30 @@ void setStr(JsonObject o, const char* key, const char* v)
 
 }  // namespace
 
+namespace {
+
+// The material of the print that just ended. The AMS unloads at FINISH, so
+// tray_now goes to "none" exactly when the cool-down rule (gentle vs fast)
+// needs the material. Remembered until a new tray is loaded or a new job
+// starts. Written from whichever task resolves first, hence the spinlock.
+struct LastTray {
+    bool       valid = false;
+    TraySource source = TraySource::None;
+    int16_t    ams = -1;
+    int16_t    slot = -1;
+    TrayReport tray{};
+};
+LastTray     g_last;
+portMUX_TYPE g_lastMux = portMUX_INITIALIZER_UNLOCKED;
+
+bool phaseKeepsLastTray(Phase ph)
+{
+    return ph == Phase::Finished || ph == Phase::Cooling || ph == Phase::Idle ||
+           ph == Phase::Failed || ph == Phase::Offline;
+}
+
+}  // namespace
+
 FilamentStatus filamentResolve(const PrinterReport& p, const FilamentConfig& fc,
                                const FanConfig& fan)
 {
@@ -59,6 +85,33 @@ FilamentStatus filamentResolve(const PrinterReport& p, const FilamentConfig& fc,
     s.ams = at.ams;
     s.slot = at.slot;
     s.trayKnown = activeTrayReport(p, at, s.tray);
+
+    if (s.trayKnown) {
+        portENTER_CRITICAL(&g_lastMux);
+        g_last.valid = true;
+        g_last.source = s.source;
+        g_last.ams = s.ams;
+        g_last.slot = s.slot;
+        g_last.tray = s.tray;
+        portEXIT_CRITICAL(&g_lastMux);
+    } else if (phaseKeepsLastTray(reportPhase(p))) {
+        LastTray last;
+        portENTER_CRITICAL(&g_lastMux);
+        last = g_last;
+        portEXIT_CRITICAL(&g_lastMux);
+        if (last.valid) {
+            s.source = TraySource::Last;
+            s.ams = last.ams;
+            s.slot = last.slot;
+            s.tray = last.tray;
+            s.trayKnown = true;
+        }
+    } else {
+        // A new job started with no tray: forget the old material.
+        portENTER_CRITICAL(&g_lastMux);
+        g_last.valid = false;
+        portEXIT_CRITICAL(&g_lastMux);
+    }
 
     if (s.trayKnown) {
         const FilamentIdent ident = filamentIdentify(s.tray.type, s.tray.sub, s.tray.idx);

@@ -287,6 +287,19 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
           <p class="mode-expl" id="modeExpl">Waiting for the first status update...</p>
         </div>
       </div>
+      <div id="cdDash" hidden style="margin-top:12px;border-top:1px solid var(--line);padding-top:11px">
+        <div class="row" style="justify-content:space-between;gap:8px;flex-wrap:nowrap;align-items:center">
+          <b id="cdDashText" style="font-size:13px;overflow-wrap:anywhere" data-tip="The post-print cool-down running now: where the chamber started, where it is going, and how long is left before the session gives up.">Cooling</b>
+          <button class="btn sm" type="button" id="cdDashStop" data-tip="End the cool-down session now. If the printer's own fans were turned on, they are switched off again.">Stop</button>
+        </div>
+        <div class="bar" style="margin:8px 0 0"><i id="cdDashBar"></i></div>
+      </div>
+      <div id="cdDashIdle" hidden style="margin-top:12px;border-top:1px solid var(--line);padding-top:11px">
+        <div class="row" style="justify-content:space-between;gap:8px;flex-wrap:nowrap;align-items:center">
+          <span class="hint" style="margin:0" id="cdDashIdleText">The printer is idle - the chamber can be emptied whenever you like.</span>
+          <button class="btn sm" type="button" id="cdDashStart" data-tip="Start a cool-down session now: this device's fan follows the setting on the Fan curve page, and - only if you have switched that on - the printer's own fans are asked to help.">Cool down now</button>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -433,6 +446,43 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
             <input type="number" id="f-ambient" data-path="fan.ambientTemp" min="0" max="40" step="1" data-tip="Assumed room temperature, 0-40 &deg;C. Used only for the cooling-rate estimate."></div>
         </div>
       </details>
+    </div>
+
+    <div class="card" id="cdCard">
+      <header><h3>Post-print cool-down</h3><span class="grow"></span><span class="badge" id="cdBadge" data-tip="Whether a cool-down session is running right now, and what it is aiming at. A session starts by itself when a print finishes and ends when the chamber reaches the target, when the time limit runs out, or when the printer starts another job.">-</span></header>
+      <p class="hint">When a print ends the printer stops driving its own fans, but the chamber is still full of heat. A cool-down session empties it down to a target so you can open the door and lift the part off - and, if you let it, it borrows the printer's own auxiliary and chamber fans to do it far faster than an external fan can.</p>
+      <div class="sw"><button type="button" role="switch" aria-checked="true" id="cd-en" data-path="cooldown.enabled" aria-labelledby="cd-en-l" data-tip="Start a cool-down session automatically the moment a print finishes. With this off you can still start one by hand from the dashboard, and Home Assistant can still switch it on."></button>
+        <span class="txt" id="cd-en-l">Start automatically after a print<small>A session also always ends by itself when the printer starts another job.</small></span></div>
+      <div class="row" style="margin-top:11px">
+        <div class="field"><label for="cd-target">Cool down to <span class="unit">&deg;C</span> <button class="qm" type="button" data-tip="The chamber temperature the session runs until. It has to be held for two consecutive readings, so a probe dipping for a second does not end the session early. When 'Use the loaded filament' is on in the Filament card, the material's own cool-down target wins over this number. Range 15-60 &deg;C.">?</button></label>
+          <input type="number" id="cd-target" data-path="cooldown.target" min="15" max="60" step="1" data-tip="Chamber temperature the cool-down runs until, 15-60 &deg;C. Overridden by the filament's own cool-down target while filament-aware cooling is on."></div>
+        <div class="field"><label for="cd-max">Give up after <span class="unit">min</span> <button class="qm" type="button" data-tip="A hard stop, so a session can never run for ever - a chamber that is already at room temperature on a warm day may simply never reach the target. Range 1-240 minutes.">?</button></label>
+          <input type="number" id="cd-max" data-path="cooldown.maxMinutes" min="1" max="240" step="1" data-tip="Maximum length of a cool-down session in minutes. Range 1-240, default 30."></div>
+      </div>
+      <div class="field"><label for="cd-own">This device&apos;s own fan <button class="qm" type="button" data-tip="What the fan wired to this device does while a session runs. 'Thermostat' regulates it down to the target, which is quiet and stops when there is nothing left to do. 'Full speed' is the answer for a duct fan with one useful setting. 'Leave the curve alone' means the session only commands the printer's fans and does not touch yours.">?</button></label>
+        <select id="cd-own" data-path="cooldown.ownFan" data-tip="Behaviour of this device's fan during a cool-down session.">
+          <option value="thermostat">Thermostat - regulate down to the target</option>
+          <option value="max">Full speed</option>
+          <option value="curve">Leave the curve alone</option></select></div>
+      <div class="sw" style="margin-top:11px"><button type="button" role="switch" aria-checked="false" id="cd-gentle" data-path="cooldown.gentleFromFilament" aria-labelledby="cd-gentle-l" data-tip="Honour the material's post-print cooling style. For a material the guide prints with the part fan off - ABS, ASA, PC - the fans stay off until the chamber is 10 &deg;C below the print target and then run at half the speeds set below. Blasting cold air at a hot ABS part is what splits it off the plate."></button>
+        <span class="txt" id="cd-gentle-l">Gentle cool-down for sensitive materials<small>ABS, ASA and PC wait until the chamber is 10 &deg;C below the print target, then run at half speed.</small></span></div>
+
+      <div class="banner warn" style="margin:13px 0 0" id="cdWarn"><svg aria-hidden="true"><use href="#i-alert"/></svg><span><b>The next setting sends commands to your printer.</b>With it on, this device publishes <code>M106</code> G-code to the printer over MQTT to run its auxiliary and chamber fans. It is the only feature that commands the printer rather than just reading from it, which is why it is <i>off by default</i>. Commands are only ever sent while the printer reports <code>FINISH</code> or <code>IDLE</code>; if a print starts, the session ends at once and sends nothing, so it can never fight a running print for the fans.</span></div>
+      <div class="sw" style="margin-top:12px"><button type="button" role="switch" aria-checked="false" id="cd-fans" data-path="cooldown.usePrinterFans" aria-labelledby="cd-fans-l" data-tip="Send M106 P2 (auxiliary fan) and M106 P3 (chamber fan) to the printer while a cool-down session runs, and M106 ... S0 when it ends. Off by default: this is the only setting that makes the device command the printer. The commands are re-sent every 30 seconds because the printer may reset its fans on its own, and never leave the device unless the printer reports FINISH or IDLE."></button>
+        <span class="txt" id="cd-fans-l">Use the printer&apos;s own fans<small>Sends M106 to the printer. Off by default - see the warning above.</small></span></div>
+      <div class="row" style="margin-top:11px">
+        <div class="field"><label for="cd-aux">Auxiliary fan <span class="unit">%</span> <button class="qm" type="button" data-tip="Speed for the printer's auxiliary part-cooling fan (M106 P2) while the session runs. On an X1C this is the big fan on the left-hand wall; it moves the most air of the three. Range 0-100 %.">?</button></label>
+          <input type="number" id="cd-aux" data-path="cooldown.auxSpeed" min="0" max="100" step="1" data-tip="Speed sent as M106 P2 during a cool-down session. Range 0-100 %."></div>
+        <div class="field"><label for="cd-chfan">Chamber fan <span class="unit">%</span> <button class="qm" type="button" data-tip="Speed for the printer's chamber/exhaust fan (M106 P3) while the session runs. This is the one that pushes air out through the filter, so it is what actually empties the chamber rather than just stirring it. Range 0-100 %.">?</button></label>
+          <input type="number" id="cd-chfan" data-path="cooldown.chamberFanSpeed" min="0" max="100" step="1" data-tip="Speed sent as M106 P3 during a cool-down session. Range 0-100 %."></div>
+      </div>
+      <dl class="kv" style="margin-top:12px">
+        <dt data-tip="How long the current session has been running, and the limit it stops at.">Session</dt><dd id="cdSession">not running</dd>
+        <dt data-tip="Whether the printer's own fans are being driven right now, and at what speeds. 'Not sent' means either the option is off, the material's gentle rule is still holding them back, or the printer is not in a state where a command may be sent.">Printer fans</dt><dd id="cdFans">-</dd>
+        <dt data-tip="Why the last session ended: target = the chamber got cool enough, timeout = the time limit ran out, newJob = the printer started printing again, stopped = you or an automation stopped it, linkLost = the printer stopped reporting, disabled = the automatic setting was switched off.">Last result</dt><dd id="cdReason">-</dd>
+      </dl>
+      <div class="btns" style="margin-top:10px"><button class="btn sm primary" type="button" id="cdStart" data-tip="Start a cool-down session now (POST /api/cooldown {&quot;start&quot;:true}). Refused while a print is running.">Cool down now</button>
+        <button class="btn sm" type="button" id="cdStop" data-tip="End the running session (POST /api/cooldown {&quot;start&quot;:false}). If the printer's fans were turned on, they are switched off again.">Stop</button></div>
     </div>
 
     <div class="card" id="filCard">
@@ -1079,7 +1129,7 @@ const MODES = {
   off: ["Off", "Both outputs are held at 0 % - the curve is not evaluated."],
   stale: ["Stale data - failsafe", "No fresh data from the printer, so the stale-data failsafe from the Fan Curve page decides the output."],
   idle: ["Idle", "Nothing to cool: no print is running and the cooldown has finished, so the fan stays off."],
-  cooldown: ["Cooldown", "The print has ended; the fan keeps running until the chamber reaches the cool-down target or the cooldown time expires."],
+  cooldown: ["Cooldown", "The print has ended and the chamber is being emptied - either by a post-print cool-down session or by the cool-down window, until the chamber reaches the cool-down target."],
   door: ["Door open", "The printer is open, so there is nothing to exhaust - the door rule on the Fan Curve page is deciding the output."],
   preheat: ["Preheating", "The printer is coming up to temperature and the fan would be fighting the heaters, so the preheat rule is deciding the output."],
   chamber: ["Chamber thermostat", "The fan is being adjusted to hold the chamber at its set point."]
@@ -1210,9 +1260,10 @@ function renderStatus(st) {
   $("#mqBadge").textContent = !st.mqttExt.enabled ? "disabled" : st.mqttExt.connected ? "connected" : "not connected";
   $("#mqBadge").className = "badge " + (!st.mqttExt.enabled ? "" : st.mqttExt.connected ? "ok" : "err");
   renderTopics();
-  /* --- thermal + filament cards --- */
+  /* --- thermal + filament + cool-down cards --- */
   renderThermal(st);
   renderFilament(st);
+  renderCooldown(st);
   /* --- fan mode selector on the curve page --- */
   $$("#modeSeg button").forEach(b => b.setAttribute("aria-pressed", b.dataset.mode === f.mode ? "true" : "false"));
   $("#modeNow").textContent = "now: " + (MODES[f.effectiveMode] || [f.effectiveMode])[0];
@@ -1236,6 +1287,85 @@ const MODE_HINTS = {
   manual: "The fan runs at the manual speed from the dashboard and ignores every temperature.",
   off: "Both outputs are held at 0 %. Nothing below has any effect until you pick another mode."
 };
+
+/* ----------------------- post-print cool-down ------------------------ */
+/* Why the last session ended, in words rather than in the API's camelCase. */
+const CD_REASONS = {
+  target: "reached the target",
+  timeout: "the time limit ran out",
+  newJob: "the printer started another job",
+  stopped: "stopped by hand",
+  linkLost: "the printer stopped reporting",
+  disabled: "the automatic cool-down was switched off"
+};
+const CD_OWN = { thermostat: "thermostat to the target", max: "full speed", curve: "the curve, untouched" };
+
+async function cooldownCmd(start) {
+  const btns = [$("#cdStart"), $("#cdStop"), $("#cdDashStart"), $("#cdDashStop")];
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await api("POST", "/api/cooldown", { start: start });
+    if (r && r.cooldown && S.st) renderStatus(Object.assign({}, S.st, { cooldown: r.cooldown }));
+    toast(start ? "Cool-down started" : "Cool-down stopped", "ok");
+  } catch (e) { fail(e); }
+  finally { btns.forEach(b => b.disabled = false); }
+}
+
+function renderCooldown(st) {
+  const cd = st.cooldown || {}, p = st.printer || {}, t = p.temps || {};
+  const active = !!cd.active;
+  const target = cd.target == null ? "--" : cd.target;
+  const cha = cd.chamber != null ? cd.chamber : t.chamber;
+
+  /* --- the card on the Fan curve page --- */
+  const b = $("#cdBadge");
+  b.textContent = active ? "cooling to " + target + " \u00b0C" : "not running";
+  b.className = "badge " + (active ? "ok" : "");
+  const mins = m => m < 1 ? "<1 min" : Math.round(m) + " min";
+  $("#cdSession").textContent = active
+    ? mins(cd.elapsedSec / 60) + " of at most " + mins(cd.maxSec / 60) +
+      (cd.startChamber != null ? " (started at " + t1(cd.startChamber) + " \u00b0C)" : "")
+    : "not running";
+  const pf = cd.printerFans || {};
+  $("#cdFans").textContent = pf.sent
+    ? "running - auxiliary " + pf.aux + " %, chamber " + pf.chamber + " %"
+    : (S.cfg && S.cfg.cooldown && S.cfg.cooldown.usePrinterFans
+      ? (active ? "not sent yet" : "allowed, but no session is running")
+      : "not used");
+  $("#cdReason").textContent = cd.reason ? (CD_REASONS[cd.reason] || cd.reason) : "-";
+  $("#cdStart").disabled = active || !!p.printing;
+  $("#cdStop").disabled = !active;
+
+  /* --- the dashboard line --- */
+  const dash = $("#cdDash"), idle = $("#cdDashIdle");
+  dash.hidden = !active;
+  /* "Cool down now" is only offered when it would actually be accepted */
+  idle.hidden = active || !!p.printing || !p.online;
+  if (active) {
+    const from = cd.startChamber, to = cd.target;
+    const own = CD_OWN[cd.ownFan] || cd.ownFan;
+    $("#cdDashText").textContent = "Cooling " +
+      (from != null ? t1(from) + " \u2192 " : "") + to + " \u00b0C" +
+      (cha != null ? " (now " + t1(cha) + ")" : "") +
+      ", " + mins(cd.elapsedSec / 60) + ", printer fans " + (pf.sent ? "on" : "off");
+    $("#cdDashText").setAttribute("data-tip",
+      "This device's fan is following " + own + ". " +
+      (pf.sent ? "The printer's auxiliary fan is at " + pf.aux + " % and its chamber fan at " +
+        pf.chamber + " %, re-sent every 30 seconds because the printer may reset them."
+        : "The printer's own fans are not being commanded.") +
+      " The session stops at " + to + " \u00b0C, after " + mins(cd.maxSec / 60) +
+      ", or as soon as the printer starts another job.");
+    /* progress along the temperature span, not along the clock */
+    let pct = 0;
+    if (from != null && cha != null && from > to) pct = clamp((from - cha) / (from - to) * 100, 0, 100);
+    else if (cd.maxSec) pct = clamp(cd.elapsedSec / cd.maxSec * 100, 0, 100);
+    $("#cdDashBar").style.width = pct.toFixed(1) + "%";
+  } else if (!idle.hidden) {
+    $("#cdDashIdleText").textContent = cd.reason
+      ? "Last cool-down: " + (CD_REASONS[cd.reason] || cd.reason) + "."
+      : "The printer is idle - the chamber can be emptied whenever you like.";
+  }
+}
 
 /* Thermal card: live rate plus the passively learned cooling constants. */
 function renderThermal(st) {
@@ -1347,6 +1477,7 @@ function renderFilament(st) {
   const b = $("#filBadge");
   b.textContent = fl.source === "none" ? "no filament"
     : fl.source === "manual" ? "set by you"
+      : fl.source === "last" ? "last print"
       : fl.source === "external" ? "external spool" : "AMS";
   b.className = "badge " + (fl.source === "none" ? "" : known ? "ok" : "warn");
   const col = filColor(tray && tray.color);
@@ -1620,6 +1751,13 @@ function wirePages() {
     finally { $$("#modeSeg button").forEach(x => x.disabled = false); }
   }));
 
+  /* Cool-down start/stop are commands, not settings: they act at once and never
+     sit in the save bar. */
+  $("#cdStart").addEventListener("click", () => cooldownCmd(true));
+  $("#cdDashStart").addEventListener("click", () => cooldownCmd(true));
+  $("#cdStop").addEventListener("click", () => cooldownCmd(false));
+  $("#cdDashStop").addEventListener("click", () => cooldownCmd(false));
+
   /* each card's Save button writes only its own section; the save bar writes everything */
   ["prSave", "mqSave", "webSave", "diagSave"].forEach(id => {
     const b = $("#" + id);
@@ -1775,7 +1913,9 @@ function renderTopics() {
   ["fan/speed", "pub", "0-100 (current output)"], ["fan/on_state", "pub", "ON when the output is above 0"],
   ["mode", "pub", "auto / manual / off"], ["fan/set", "sub", "0-100 → manual mode at that speed"],
   ["fan/on", "sub", "ON → manual, OFF → mode off"], ["mode/set", "sub", "auto / manual / off"],
-  ["curve/set", "sub", '{"points":[{"temp":0,"speed":0},…]}'], ["restart", "sub", "any payload → reboot"]];
+  ["curve/set", "sub", '{"points":[{"temp":0,"speed":0},…]}'],
+  ["cooldown/set", "sub", "ON → start a cool-down session, OFF → stop it"],
+  ["restart", "sub", "any payload → reboot"]];
   $("#topicRows").innerHTML = rows.map(r => '<tr><td class="mono nowrap">' + esc(base + "/" + r[0]) + "</td><td>" + r[1] + "</td><td>" + esc(r[2]) + "</td><td>" + copyBtn(base + "/" + r[0]) + "</td></tr>").join("");
   $$("#topicRows [data-copy]").forEach(b => b.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied " + b.dataset.copy, "ok"); }
@@ -1792,6 +1932,7 @@ function renderApiTable() {
     ["GET", "/api/curve", "The stored curve points and the source temperature.", "curl " + h + "/api/curve"],
     ["PUT", "/api/curve", "Replace the curve (2-16 points, 0-400 °C, 0-100 %).", "curl -X PUT -d '{\"points\":[{\"temp\":0,\"speed\":0},{\"temp\":250,\"speed\":100}]}' " + h + "/api/curve"],
     ["POST", "/api/fan", "Set mode/speed, optionally for a limited time.", "curl -X POST -d '{\"mode\":\"manual\",\"speed\":60,\"durationSec\":600}' " + h + "/api/fan"],
+    ["POST", "/api/cooldown", "Start or stop a post-print cool-down session.", "curl -X POST -d '{\"start\":true}' " + h + "/api/cooldown"],
     ["GET", "/api/wifi/scan", "202 while scanning, then the cached network list; ?force=1 starts a new scan.", "curl " + h + "/api/wifi/scan?force=1"],
     ["POST", "/api/wifi", "Store WiFi credentials (always needs a restart).", "curl -X POST -d '{\"ssid\":\"Home\",\"password\":\"secret\"}' " + h + "/api/wifi"],
     ["GET", "/api/log", "The last 64 log lines.", "curl " + h + "/api/log"],

@@ -11,6 +11,7 @@
 
 #include "app.h"
 #include "config.h"
+#include "cooldown.h"
 #include "curve.h"
 #include "fan_control.h"
 #include "filament.h"
@@ -347,6 +348,29 @@ void handlePostFan(AsyncWebServerRequest* request, JsonVariant& json)
     JsonDocument st;
     buildStatus(st.to<JsonObject>());
     root["fan"] = st["fan"];
+    sendJson(request, doc);
+}
+
+// --- /api/cooldown ---------------------------------------------------------
+
+// The one endpoint that can make the device command the printer, so it says no
+// rather than clamping: starting a cool-down over a running print would fight
+// the print's own fan settings.
+void handlePostCooldown(AsyncWebServerRequest* request, JsonVariant& json)
+{
+    if (!authorised(request)) return;
+    JsonObjectConst in = json.as<JsonObjectConst>();
+    if (in.isNull()) { sendError(request, 400, "expected a json object"); return; }
+    if (!in["start"].is<bool>()) { sendError(request, 400, "expected {\"start\":true|false}"); return; }
+
+    const bool start = in["start"].as<bool>();
+    const char* err = "printer is busy";
+    if (!cooldownRequest(start, &err)) { sendError(request, 400, err); return; }
+
+    JsonDocument doc;
+    JsonObject root = doc.to<JsonObject>();
+    root["ok"] = true;
+    cooldownToJson(root["cooldown"].to<JsonObject>());
     sendJson(request, doc);
 }
 
@@ -730,6 +754,7 @@ void webServerSetup()
     registerJsonRoute("/api/config", HTTP_POST, handlePostConfig);
     registerJsonRoute("/api/curve", HTTP_PUT, handlePutCurve);
     registerJsonRoute("/api/fan", HTTP_POST, handlePostFan);
+    registerJsonRoute("/api/cooldown", HTTP_POST, handlePostCooldown);
     registerJsonRoute("/api/factoryreset", HTTP_POST, handleFactoryReset);
     registerJsonRoute("/api/wifi", HTTP_POST, handleWifiPost);
     registerJsonRoute("/api/restore", HTTP_POST, handleRestore);

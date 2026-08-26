@@ -5,7 +5,8 @@ temperatures. It reads the printer over the printer's own local MQTT link, looks
 in a curve you draw in your browser, and sets the fan speed. It can also work the other way round —
 hold the enclosure at a temperature you pick and adjust the fan until it gets there — and it knows
 to leave the fan alone while the printer is warming up or the door is open. It also reads which
-filament is loaded and picks the right temperatures for it on its own. Everything is configured
+filament is loaded and picks the right temperatures for it on its own, and when a print ends it can
+empty the heat out of the chamber — with your own fan, and with the printer's fans if you let it. Everything is configured
 from a web page on the device itself — no app, no cloud account.
 
 This guide assumes you have never flashed an ESP32 before. Follow it top to bottom.
@@ -20,13 +21,14 @@ This guide assumes you have never flashed an ESP32 before. Follow it top to bott
 | [6. Door and print phases](#6-door-and-print-phases) | rules that watch what the printer is *doing* |
 | [7. Chamber thermostat mode](#7-chamber-thermostat-mode) | hold the enclosure at a temperature |
 | [8. Filament-aware cooling](#8-filament-aware-cooling) | let the loaded material pick the targets |
-| [9. Manual override](#9-manual-override) | take control from the dashboard |
-| [10. Home Assistant in five minutes](#10-home-assistant-in-five-minutes) | broker, discovery, entities |
-| [11. Updating the firmware](#11-updating-the-firmware) | OTA from the System page |
-| [12. Backup, restore, restart, factory reset, login](#12-backup-restore-restart-factory-reset-login) | maintenance |
-| [13. The status LED](#13-the-status-led) | what the blinks mean |
-| [14. Troubleshooting](#14-troubleshooting) | symptom → cause → fix |
-| [15. Serial provisioning (the fallback)](#15-serial-provisioning-the-fallback) | when the browser route fails |
+| [9. Cooling the chamber after a print](#9-cooling-the-chamber-after-a-print) | empty the heat out, optionally with the printer's own fans |
+| [10. Manual override](#10-manual-override) | take control from the dashboard |
+| [11. Home Assistant in five minutes](#11-home-assistant-in-five-minutes) | broker, discovery, entities |
+| [12. Updating the firmware](#12-updating-the-firmware) | OTA from the System page |
+| [13. Backup, restore, restart, factory reset, login](#13-backup-restore-restart-factory-reset-login) | maintenance |
+| [14. The status LED](#14-the-status-led) | what the blinks mean |
+| [15. Troubleshooting](#15-troubleshooting) | symptom → cause → fix |
+| [16. Serial provisioning (the fallback)](#16-serial-provisioning-the-fallback) | when the browser route fails |
 
 ---
 
@@ -562,7 +564,102 @@ a link back.
 
 ---
 
-## 9. Manual override
+## 9. Cooling the chamber after a print
+
+A finished print is not a finished job. The chamber is still full of heat, the part is still soft
+enough to lift off the plate deformed, and the printer — which has just reported `FINISH` — has
+stopped driving its own fans. Everything in the machine is now standing still in a hot box.
+
+BLSmartFlow can run a **cool-down session**: from the moment a print finishes, it drives the fan
+until the chamber has dropped to a temperature you pick, then stops. It is on by default and needs no
+setup. What is *not* on by default is the interesting part: with your permission it can also borrow
+the printer's own auxiliary and chamber fans, which sit inside the enclosure and shift far more air
+than any fan you can bolt to the outside.
+
+Everything here lives in the **Post-print cool-down** card on the Fan curve page.
+
+### What happens by default
+
+When a print ends, a session starts. Your fan follows whichever behaviour you picked under *This
+device's own fan* (by default it regulates the chamber down to the target, the same way Chamber
+thermostat mode does). The session ends the moment any of these is true:
+
+* the chamber has been **at or below the target for two readings** in a row (five seconds apart, so a
+  probe dipping for a second cannot end it early);
+* the **time limit** has run out — 30 minutes unless you change it;
+* the printer has **started another job**, in which case the session gets out of the way instantly;
+* you pressed **Stop**, or an automation sent `OFF`;
+* the printer stopped reporting for more than half a minute.
+
+The dashboard shows the session as a progress line under the fan gauge — *Cooling 52.0 → 35 °C (now
+41.2), 12 min, printer fans on* — with a **Stop** button. When no session is running and the printer
+is idle, the same place offers **Cool down now**. The Fan curve card also records why the last
+session ended, which is usually the quickest way to find out that the time limit is too short.
+
+### Cool down to what?
+
+The **Cool down to** field is a chamber temperature, 15–60 °C. Somewhere in the mid thirties is a
+sensible default: cool enough that a PLA part is rigid and the enclosure is comfortable to reach
+into, warm enough that the fan is not running for an hour chasing room temperature on a summer
+afternoon.
+
+If **Use the loaded filament** is on in the Filament card (it is by default), the material's own
+cool-down target wins over this number, including anything you set in *Override for this material*.
+That is deliberate: the material is what decides how fast it may be cooled, not the printer.
+
+### Using the printer's own fans
+
+This is the one feature in BLSmartFlow that **sends commands to your printer**. Everything else only
+reads. Switching it on makes the device publish `M106` G-code over the printer's local MQTT link:
+`M106 P2` for the auxiliary fan and `M106 P3` for the chamber fan, at the percentages you set, and
+`M106 P2 S0 / P3 S0` when the session ends.
+
+It is off by default, and the safety rules around it are strict:
+
+* Commands are **only** ever sent while the printer reports `FINISH` or `IDLE`. If the printer is
+  running, paused, preparing or slicing, nothing leaves the device.
+* If a print starts during a session, the session ends immediately and sends **nothing at all** —
+  not even the "fans off" command. The print has just set the fans it wants and must keep them.
+* The commands are re-sent every 30 seconds, because the printer may reset its fans on its own and
+  a command that is never repeated quietly stops being true.
+* If the printer stops reporting, nothing is queued up to be delivered late.
+
+If you have an X1 or a P1S, this is worth switching on: the difference between an external duct fan
+and the printer's own auxiliary fan is not subtle. On other models the `P2`/`P3` numbers may not
+correspond to the same fans, in which case the commands simply do nothing useful and the setting is
+best left off.
+
+### Gentle cool-down
+
+**Gentle cool-down for sensitive materials** honours what the filament guide says about the
+material. ABS, ASA and PC are printed with the part fan off for a reason: cold air on a hot part is
+what makes it crack, split and peel off the plate. With this on (the default), a session on one of
+those materials keeps the printer's fans **off** until the chamber is 10 °C below the print target,
+and then runs them at **half** the percentages you set. Your own fan follows the same rule.
+
+For PLA and PETG — materials the guide prints with the part fan running anyway — nothing is held
+back and the session runs at full speed from the start.
+
+### Starting one by hand
+
+You do not have to wait for a print. **Cool down now**, on the dashboard or in the card, starts a
+session at any time the printer is not printing — useful after opening the door to fetch a part, or
+before a print you want to start in a cool chamber. A session you started by hand is not affected by
+the *Start automatically after a print* switch, so you can leave the automatic behaviour off and
+still use the button.
+
+Starting one while a print is running is refused with *printer is busy*.
+
+### From Home Assistant
+
+Discovery creates a **Cool-down** switch (turning it on starts a session, off stops one), a
+**Cool-down remaining** sensor in minutes and a **Cool-down result** sensor carrying the reason the
+last session ended. The switch is the session, not the setting: switching it off does not disable
+the feature, it ends the session that is running.
+
+---
+
+## 10. Manual override
 
 The **Manual override** card on the dashboard takes the fan away from the curve.
 
@@ -588,7 +685,7 @@ On a phone the same controls sit in a single column with the navigation as a bot
 
 ---
 
-## 10. Home Assistant in five minutes
+## 11. Home Assistant in five minutes
 
 The device can talk to your own MQTT broker (the Mosquitto add-on, for example) and announce itself
 to Home Assistant automatically. This is completely separate from the printer link.
@@ -625,6 +722,8 @@ What you get:
 | Print progress, Remaining time | `sensor` | % and minutes. |
 | Printer WiFi, Device RSSI, Uptime | `sensor` | Diagnostics. |
 | Printer online, Door, Printing | `binary_sensor` | Connectivity, front door open, print running. *Door* shows **Unknown** on printers that never report a door change. |
+| Cool-down | `switch` | Starts and stops a post-print cool-down session (see [Section 9](#9-cooling-the-chamber-after-a-print)). It is the *session*, not the setting: switching it off does not disable the feature. |
+| Cool-down remaining, Cool-down result | `sensor` | Minutes left before the session gives up, and why the last one ended (`target`, `timeout`, `newJob`, `stopped`, `linkLost`, `disabled`). |
 | Restart | `button` | Reboots the device. |
 
 > **Details.** Turning discovery off again publishes empty discovery messages, which removes the
@@ -638,7 +737,7 @@ You do not need Home Assistant to use MQTT: the same status document is publishe
 
 ---
 
-## 11. Updating the firmware
+## 12. Updating the firmware
 
 ![The System page with device info, firmware update, backup, web access and maintenance cards](img/ui-system.png)
 
@@ -655,7 +754,7 @@ You do not need Home Assistant to use MQTT: the same status document is publishe
 
 ---
 
-## 12. Backup, restore, restart, factory reset, login
+## 13. Backup, restore, restart, factory reset, login
 
 All of these live on the **System** page.
 
@@ -680,11 +779,11 @@ capitals to unlock the button. Everything goes: WiFi, printer details, curve, MQ
 > trusted LAN, nothing more. Requests that arrive over the **setup network** are never asked for a
 > password, so a device you can reach on its own hotspot is a way back in. If you forget the password
 > and the device is happily on your WiFi (so the setup network is not running), the way back is the
-> serial command `{"cmd":"factoryreset"}` over USB — see [section 15](#15-serial-provisioning-the-fallback).
+> serial command `{"cmd":"factoryreset"}` over USB — see [section 16](#16-serial-provisioning-the-fallback).
 
 ---
 
-## 13. The status LED
+## 14. The status LED
 
 The LED on GPIO 21 shows the most important problem first: WiFi beats the printer link, and the
 printer link beats stale data.
@@ -700,7 +799,7 @@ printer link beats stale data.
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -726,13 +825,16 @@ printer link beats stale data.
 | The fan never starts | Minimum speed is above what the curve asks for, or kick-start is off and the fan cannot break away | Lower **Minimum speed**, turn **Kick-start** on, or raise the curve |
 | The fan whines, buzzes or ticks | PWM carrier frequency does not suit the fan or the driver board | Keep **PWM frequency** at 25000 Hz for good 4-pin and 2-pin fans; some cheap fans and MOSFET boards prefer 1000–8000 Hz |
 | The fan runs full speed when the UI says 0 % | The driver board is active-low | Turn **Invert PWM** on |
+| The printer's fans do nothing during a cool-down | *Use the printer's own fans* is off (it is by default), or the material's gentle rule is still holding them back, or the printer is not reporting `FINISH`/`IDLE` | Check the **Printer fans** row in the Post-print cool-down card — it says which of the three it is. Nothing is ever sent unless the printer reports `FINISH` or `IDLE` |
+| The cool-down ends immediately with *the printer started another job* | The printer went back to `RUNNING`, `PREPARE`, `PAUSE` or `SLICING` | Nothing to fix — this is the safety rule. A running print owns its own fans and the session gets out of the way without sending anything |
+| The cool-down never finishes | The target is below what the room can reach, so only the time limit can end it | Raise **Cool down to**, or lower **Give up after**. *Room temperature* on the Chamber thermostat card is a good sanity check |
 | The fan stops as soon as a print finishes | *Only while printing* is on and the cooldown has elapsed | Raise **Cooldown**, or turn *Only while printing* off |
 | The dashboard stops updating in one tab | The device accepts at most 4 live event streams at once; extra tabs are refused | Close spare tabs. A refused tab falls back to polling every 2 seconds |
-| Forgotten UI password | Basic auth applies to everything on your LAN | Send `{"cmd":"factoryreset"}` over USB serial (section 15), or reach the device on the setup network, where no password is asked |
+| Forgotten UI password | Basic auth applies to everything on your LAN | Send `{"cmd":"factoryreset"}` over USB serial (section 16), or reach the device on the setup network, where no password is asked |
 
 ---
 
-## 15. Serial provisioning (the fallback)
+## 16. Serial provisioning (the fallback)
 
 If the browser route fails — no WiFi at all, a forgotten password, or a device you want to
 pre-configure on the bench — you can talk to the module over USB.

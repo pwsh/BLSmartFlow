@@ -10,6 +10,7 @@
 
 #include "blflow/app.h"
 #include "blflow/config.h"
+#include "blflow/cooldown.h"
 #include "blflow/fan_control.h"
 #include "blflow/ha_mqtt.h"
 #include "blflow/indicator.h"
@@ -85,6 +86,7 @@ void setup()
 
     indicatorSetup();
     fanControlSetup();
+    cooldownSetup();
     thermalSetup();
     serialProvisionSetup();
 
@@ -103,6 +105,9 @@ void loop()
     // Order matters only in that fan control runs first, so its timing is never
     // pushed around by slower housekeeping.
     fanControlLoop();
+    // Before thermal/indicator: the fan controller reads the session's request,
+    // so stepping it here keeps the two at most one 100 ms tick apart.
+    cooldownLoop();
     thermalLoop();
     indicatorLoop();
     wifiLoop();

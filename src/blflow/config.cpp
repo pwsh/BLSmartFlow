@@ -211,6 +211,19 @@ void configDefaults(Config& c)
     c.filament.ventFloor[VENT_REQUIRED] = 10;
     c.filament.overrideCount = 0;
 
+    // Post-print cool-down (REWORK-SPEC 17.1). The session itself is on by
+    // default - it only runs the device's own fan, which it was already doing
+    // after a print. Borrowing the *printer's* fans is the one thing here that
+    // sends commands to the printer, so that stays off until the user asks.
+    c.cooldown.enabled = true;
+    c.cooldown.target = 35;
+    c.cooldown.usePrinterFans = false;
+    c.cooldown.auxSpeed = 100;
+    c.cooldown.chamberFanSpeed = 100;
+    c.cooldown.maxMinutes = 30;
+    c.cooldown.gentleFromFilament = true;
+    c.cooldown.ownFan = CD_OWN_THERMOSTAT;
+
     c.mqtt.enabled = false;
     c.mqtt.port = 1883;
     c.mqtt.haDiscovery = true;
@@ -338,6 +351,13 @@ void configValidate(Config& c)
         memset(&c.filament.overrides[i], 0, sizeof(c.filament.overrides[i]));
     }
     c.filament.overrideCount = keep;
+
+    // --- post-print cool-down ---
+    c.cooldown.target = clampVal<uint8_t>(c.cooldown.target, 15, 60);
+    c.cooldown.auxSpeed = clampVal<uint8_t>(c.cooldown.auxSpeed, 0, 100);
+    c.cooldown.chamberFanSpeed = clampVal<uint8_t>(c.cooldown.chamberFanSpeed, 0, 100);
+    c.cooldown.maxMinutes = clampVal<uint16_t>(c.cooldown.maxMinutes, 1, 240);
+    if (c.cooldown.ownFan > CD_OWN_CURVE) c.cooldown.ownFan = CD_OWN_THERMOSTAT;
 
     // --- mqtt ---
     if (c.mqtt.port == 0) c.mqtt.port = 1883;
@@ -528,6 +548,19 @@ void applyDocument(JsonObjectConst root, Config& c)
         c.thermal.samples = th["samples"] | c.thermal.samples;
     }
     filamentFromJson(root["filament"], c.filament);
+    JsonObjectConst cd = root["cooldown"];
+    if (!cd.isNull()) {
+        c.cooldown.enabled            = cd["enabled"]            | c.cooldown.enabled;
+        c.cooldown.target             = cd["target"]             | c.cooldown.target;
+        c.cooldown.usePrinterFans     = cd["usePrinterFans"]     | c.cooldown.usePrinterFans;
+        c.cooldown.auxSpeed           = cd["auxSpeed"]           | c.cooldown.auxSpeed;
+        c.cooldown.chamberFanSpeed    = cd["chamberFanSpeed"]    | c.cooldown.chamberFanSpeed;
+        c.cooldown.maxMinutes         = cd["maxMinutes"]         | c.cooldown.maxMinutes;
+        c.cooldown.gentleFromFilament = cd["gentleFromFilament"] | c.cooldown.gentleFromFilament;
+        if (cd["ownFan"].is<const char*>()) {
+            c.cooldown.ownFan = cooldownOwnFanFromName(cd["ownFan"].as<const char*>(), c.cooldown.ownFan);
+        }
+    }
     JsonObjectConst m = root["mqtt"];
     if (!m.isNull()) {
         c.mqtt.enabled = m["enabled"] | c.mqtt.enabled;
@@ -746,6 +779,18 @@ void configToJson(JsonObject out, const Config& c, bool masked)
 
     filamentToJson(out["filament"].to<JsonObject>(), c.filament);
 
+    JsonObject cd = out["cooldown"].to<JsonObject>();
+    cd["enabled"] = c.cooldown.enabled;
+    cd["target"] = c.cooldown.target;
+    cd["usePrinterFans"] = c.cooldown.usePrinterFans;
+    cd["auxSpeed"] = c.cooldown.auxSpeed;
+    cd["chamberFanSpeed"] = c.cooldown.chamberFanSpeed;
+    cd["maxMinutes"] = c.cooldown.maxMinutes;
+    cd["gentleFromFilament"] = c.cooldown.gentleFromFilament;
+    // A string literal from cooldownOwnFanName(), not a local buffer, so the
+    // pointer ArduinoJson stores stays valid without a String() copy.
+    cd["ownFan"] = cooldownOwnFanName(c.cooldown.ownFan);
+
     JsonObject th = out["thermal"].to<JsonObject>();
     JsonArray k = th["k"].to<JsonArray>();
     // ArduinoJson serialises NaN as null, which is exactly what "never measured"
@@ -818,6 +863,23 @@ void configFromJson(JsonObjectConst in, Config& c, ConfigChange& change)
         // Everything here feeds the fan controller's set points, so a change is a
         // fan change: it takes effect on the next control tick, no restart.
         filamentFromJson(fil, c.filament);
+        change.fanChanged = true;
+    }
+
+    JsonObjectConst cd = in["cooldown"];
+    if (!cd.isNull()) {
+        mergeBool(cd, "enabled", c.cooldown.enabled);
+        mergeNum<uint8_t>(cd, "target", c.cooldown.target);
+        mergeBool(cd, "usePrinterFans", c.cooldown.usePrinterFans);
+        mergeNum<uint8_t>(cd, "auxSpeed", c.cooldown.auxSpeed);
+        mergeNum<uint8_t>(cd, "chamberFanSpeed", c.cooldown.chamberFanSpeed);
+        mergeNum<uint16_t>(cd, "maxMinutes", c.cooldown.maxMinutes);
+        mergeBool(cd, "gentleFromFilament", c.cooldown.gentleFromFilament);
+        if (cd["ownFan"].is<const char*>()) {
+            c.cooldown.ownFan = cooldownOwnFanFromName(cd["ownFan"].as<const char*>(), c.cooldown.ownFan);
+        }
+        // The session reads the config on every tick, so nothing has to be
+        // re-applied; it is still a fan change for the UI's "saved" feedback.
         change.fanChanged = true;
     }
 

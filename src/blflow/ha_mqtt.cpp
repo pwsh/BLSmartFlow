@@ -7,6 +7,7 @@
 
 #include "app.h"
 #include "config.h"
+#include "cooldown.h"
 #include "curve.h"
 #include "fan_control.h"
 #include "log.h"
@@ -184,6 +185,25 @@ void discoverNumber(const char* objectId, const char* name, const char* commandS
     publishDiscovery("number", objectId, doc, remove);
 }
 
+// A switch whose state is read out of the retained `state` document. Used for
+// the cool-down session, which is a thing you turn on and off rather than a
+// setting you store.
+void discoverSwitch(const char* objectId, const char* name, const char* commandSuffix,
+                    const char* valueTemplate, const char* icon, bool remove)
+{
+    JsonDocument doc;
+    if (!remove) {
+        doc["name"] = name;
+        doc["command_topic"] = topic(commandSuffix);
+        doc["state_topic"] = topic("state");
+        doc["value_template"] = valueTemplate;
+        doc["payload_on"] = "ON";
+        doc["payload_off"] = "OFF";
+        if (icon) doc["icon"] = icon;
+    }
+    publishDiscovery("switch", objectId, doc, remove);
+}
+
 void publishDiscoveryAll(bool remove)
 {
     {
@@ -276,6 +296,23 @@ void publishDiscoveryAll(bool remove)
                             "mdi:printer-3d-nozzle", remove);
     discoverSensor("filament_chamber_target", "Filament chamber target", filamentChamberT.c_str(),
                    "\u00b0C", "temperature", nullptr, "mdi:home-thermometer", remove);
+
+    // Post-print cool-down (REWORK-SPEC 17.3). The switch is the session, not the
+    // setting: turning it off ends the session, it does not disable the feature.
+    discoverSwitch("cooldown", "Cool-down", "cooldown/set",
+                   "{{ 'ON' if value_json.cooldown.active else 'OFF' }}",
+                   "mdi:snowflake", remove);
+    // Minutes left before the hard stop, so an automation can say "tell me when
+    // the chamber is cool" without subscribing to the whole state document.
+    static const char kCooldownRemaining[] =
+        "{% set c = value_json.cooldown %}"
+        "{{ ((c.maxSec - c.elapsedSec) / 60) | round(0, 'ceil') if c.active else 0 }}";
+    discoverSensor("cooldown_remaining", "Cool-down remaining", kCooldownRemaining,
+                   "min", "duration", nullptr, "mdi:timer-sand", remove);
+    static const char kCooldownReason[] =
+        "{% set v = value_json.cooldown.reason %}{{ 'none' if v is none else v }}";
+    discoverSensor("cooldown_reason", "Cool-down result", kCooldownReason,
+                   nullptr, nullptr, nullptr, "mdi:information-outline", remove);
 
     discoverBinary("printer_online", "Printer online", "{{ 'ON' if value_json.printer.online else 'OFF' }}", "connectivity", remove);
     // doorOpen is null until the printer has proved its door switch reports.
@@ -447,6 +484,13 @@ void onCommand(char* rawTopic, byte* payload, unsigned int length)
             if (cooldown >= 0) cfg().fan.cooldownTarget = (uint8_t)(cooldown > 255 ? 255 : cooldown);
         }
         applyAndPersist();
+    } else if (suffix == "cooldown/set") {
+        const bool on = strcasecmp(body, "OFF") != 0 && strcmp(body, "0") != 0;
+        const char* err = "printer is busy";
+        if (!cooldownRequest(on, &err)) {
+            LOGW("ha: cooldown/set refused (%s)", err);
+            return;
+        }
     } else if (suffix == "restart") {
         LOGW("ha: restart requested over mqtt");
         appRequestRestart(500);
@@ -467,6 +511,7 @@ void subscribeAll()
     g_mqtt.subscribe(topic("chamber_target/set").c_str());
     g_mqtt.subscribe(topic("cooldown_target/set").c_str());
     g_mqtt.subscribe(topic("target/set").c_str());
+    g_mqtt.subscribe(topic("cooldown/set").c_str());
     g_mqtt.subscribe(topic("restart").c_str());
 }
 

@@ -14,6 +14,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "cooldown_logic.h"
 #include "curve.h"
 #include "filament_match.h"
 
@@ -95,6 +96,12 @@ struct ThermalConfig {
     uint32_t samples;
 };
 
+// Post-print cool-down (REWORK-SPEC 17.1). The struct itself is CooldownRules
+// from cooldown_logic.h, so the persisted document and the pure state machine
+// can never disagree about what a rule means. `ownFan` is the CD_OWN_* enum in
+// memory and a string in JSON - see cooldownOwnFanName().
+typedef CooldownRules CooldownConfig;
+
 struct MqttConfig {
     bool     enabled;
     char     host[64];
@@ -133,6 +140,7 @@ struct Config {
     SsdpConfig    ssdp;
     ThermalConfig thermal;
     FilamentConfig filament;
+    CooldownConfig cooldown;
 };
 
 // The single live instance. Written from the loop task, the AsyncTCP task (every

@@ -4,6 +4,7 @@
 #include <math.h>
 
 #include "config.h"
+#include "cooldown.h"
 #include "fan_control.h"
 #include "filament.h"
 #include "ha_mqtt.h"
@@ -143,6 +144,10 @@ void buildStatus(JsonObject out)
     // from the same snapshot as the fan block above, so the effective targets it
     // reports are the ones the control loop is using this second.
     filamentToJson(out["filament"].to<JsonObject>(), p, c.filament, c.fan);
+
+    // The post-print cool-down session (REWORK-SPEC 17.3): what it is aiming at,
+    // how far it has got, and whether the printer's own fans are being driven.
+    cooldownToJson(out["cooldown"].to<JsonObject>());
 
     thermalToJson(out["thermal"].to<JsonObject>());
 

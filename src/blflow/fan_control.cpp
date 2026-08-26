@@ -3,6 +3,7 @@
 #include <math.h>
 
 #include "config.h"
+#include "cooldown.h"
 #include "filament.h"
 #include "log.h"
 #include "printer_link.h"
@@ -286,14 +287,27 @@ void fanControlLoop()
     // energy and, on an enclosed printer, can stop the chamber reaching target.
     const bool preheatRule = strcmp(fc.preheatMode, "ignore") != 0 && phase == Phase::Preheat;
 
+    // --- post-print cool-down session (REWORK-SPEC 17.2) --------------------
+    // While a session runs it decides what the device's own fan does, in every
+    // mode except off/manual (checked below) - that is the whole point of
+    // `ownFan`. "curve" means "do not interfere", so it never appears here.
+    const CooldownFanRequest cd = cooldownFanRequest();
+    const bool cdMax = cd.active && cd.ownFan == CD_OWN_MAX;
+    const bool cdThermostat = cd.active && cd.ownFan == CD_OWN_THERMOSTAT && !isnan(p.chamber);
+
     const bool chamberMode = strcmp(fc.mode, "chamber") == 0;
     // The thermostat needs a chamber reading; without one it has nothing to
     // control and the curve is the honest fallback.
-    const bool thermostatUsable = chamberMode && !isnan(p.chamber);
+    const bool thermostatUsable = (chamberMode || cdThermostat) && !isnan(p.chamber);
     const bool thermostatCooldown = phase == Phase::Finished || phase == Phase::Cooling ||
                                     (phase == Phase::Idle && recentPrint);
     float setpoint = NAN;
-    if (thermostatUsable) {
+    if (cdThermostat) {
+        // The session's own target, which may be the material's rather than the
+        // configured one; it also outranks the chamber mode's cool-down set
+        // point, because the user started this session against that number.
+        setpoint = cd.target;
+    } else if (thermostatUsable) {
         if (phaseIsPrinting(phase))    setpoint = (float)effChamberTarget;
         else if (thermostatCooldown)   setpoint = (float)effCooldownTarget;
     }
@@ -304,6 +318,8 @@ void fanControlLoop()
     else if (stale)                           eff = "stale";
     else if (doorRule)                        eff = "door";
     else if (preheatRule)                     eff = "preheat";
+    else if (cdMax)                                         eff = "cooldown";
+    else if (cdThermostat)                                  eff = "cooldown";
     else if (thermostatUsable && isnan(setpoint))           eff = "idle";
     else if (thermostatUsable && thermostatCooldown)        eff = "cooldown";
     else if (thermostatUsable)                              eff = "chamber";
@@ -324,6 +340,9 @@ void fanControlLoop()
         target = strcmp(fc.doorMode, "fixed") == 0 ? (float)fc.doorSpeed : 0.0f;
     } else if (strcmp(eff, "preheat") == 0) {
         target = strcmp(fc.preheatMode, "fixed") == 0 ? (float)fc.preheatSpeed : 0.0f;
+    } else if (cdMax && strcmp(eff, "cooldown") == 0) {
+        // "max" is the answer for a duct fan that has one useful speed.
+        target = 100.0f;
     } else if (strcmp(eff, "stale") == 0) {
         if (strcmp(fc.staleMode, "hold") == 0)       target = g_slew;
         else if (strcmp(fc.staleMode, "fixed") == 0) target = (float)fc.staleSpeed;
@@ -368,7 +387,7 @@ void fanControlLoop()
     // Anything that is not the thermostat leaves it with a clean slate, so
     // coming back from a door event or a manual override does not resume with a
     // stale integral.
-    const bool thermostatRan = thermostatUsable && !isnan(setpoint) &&
+    const bool thermostatRan = thermostatUsable && !isnan(setpoint) && !cdMax &&
                                strcmp(eff, "door") != 0 && strcmp(eff, "preheat") != 0 &&
                                strcmp(eff, "stale") != 0 && strcmp(eff, "off") != 0 &&
                                strcmp(eff, "manual") != 0;

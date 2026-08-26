@@ -52,6 +52,24 @@ const uint32_t kBackoffMaxMs = 60000;
 const uint32_t kPushallP1IntervalMs   = 5UL * 60UL * 1000UL;
 const uint32_t kPushallAutoIntervalMs = 10UL * 60UL * 1000UL;
 
+// --- outgoing G-code queue (REWORK-SPEC 17.2) ------------------------------
+// The cool-down session runs on the loop task but MQTT belongs to this one, so
+// commands are handed over through a tiny ring rather than by sharing the
+// client. Four slots is deliberate: the only producer sends at most two lines
+// every five seconds, and a queue deeper than that would only let a backlog of
+// stale fan commands build up behind a dead link.
+const uint8_t kGcodeSlots = 4;
+
+struct GcodeSlot {
+    char text[PRINTER_GCODE_MAX];
+};
+
+GcodeSlot     g_gcodeQ[kGcodeSlots];
+uint8_t       g_gcodeHead = 0;      // next free slot
+uint8_t       g_gcodeTail = 0;      // oldest unpublished slot
+portMUX_TYPE  g_gcodeMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t      g_gcodeSeq = 1;
+
 uint32_t g_backoffMs = kBackoffMinMs;
 uint32_t g_nextAttemptMs = 0;
 uint32_t g_lastPushallMs = 0;
@@ -132,8 +150,67 @@ uint32_t pushallIntervalMs(const LinkCfg& c)
     return 0;
 }
 
+// Publishes the oldest queued line, leaving it in place if the publish fails so
+// the next tick retries it (REWORK-SPEC 17.2). Returns false when there is
+// nothing to do or the publish failed.
+bool publishOneGcode()
+{
+    char line[PRINTER_GCODE_MAX];
+    portENTER_CRITICAL(&g_gcodeMux);
+    const bool empty = g_gcodeHead == g_gcodeTail;
+    if (!empty) memcpy(line, g_gcodeQ[g_gcodeTail].text, sizeof(line));
+    portEXIT_CRITICAL(&g_gcodeMux);
+    if (empty) return false;
+
+    // Built with ArduinoJson rather than sprintf: the payload carries embedded
+    // newlines, and a hand-rolled escape is exactly the kind of thing that turns
+    // "M106 P2 S255" into a printer-side parse error.
+    JsonDocument doc;
+    JsonObject pr = doc["print"].to<JsonObject>();
+    pr["sequence_id"] = String(g_gcodeSeq);
+    pr["command"] = "gcode_line";
+    pr["param"] = line;              // char* -> ArduinoJson copies it
+    String payload;
+    serializeJson(doc, payload);
+
+    if (!g_mqtt->publish(g_requestTopic.c_str(), payload.c_str())) {
+        LOGW("printer: gcode publish failed (state %d), will retry", g_mqtt->state());
+        return false;
+    }
+    // Logged on one line: the payload carries real newlines, and a log entry
+    // that breaks in the middle is unreadable in the UI's log box.
+    char disp[PRINTER_GCODE_MAX];
+    for (size_t i = 0; i < sizeof(disp); i++) {
+        disp[i] = (line[i] == '\n' || line[i] == '\r') ? ' ' : line[i];
+        if (!line[i]) break;
+    }
+    disp[sizeof(disp) - 1] = '\0';
+    size_t end = strlen(disp);
+    while (end > 0 && disp[end - 1] == ' ') disp[--end] = '\0';
+    LOGI("printer <- %s", disp);
+    g_gcodeSeq++;
+
+    portENTER_CRITICAL(&g_gcodeMux);
+    // Only advance once the bytes are actually on the wire; the producer may
+    // have appended more in the meantime, which is why tail is recomputed here.
+    if (g_gcodeHead != g_gcodeTail) g_gcodeTail = (uint8_t)((g_gcodeTail + 1) % kGcodeSlots);
+    portEXIT_CRITICAL(&g_gcodeMux);
+    return true;
+}
+
+// Anything still queued when the link goes down is a fan command for a printer
+// state we can no longer vouch for. Dropping it is the safe choice: the session
+// re-asserts every 30 s anyway.
+void dropQueuedGcode()
+{
+    portENTER_CRITICAL(&g_gcodeMux);
+    g_gcodeTail = g_gcodeHead;
+    portEXIT_CRITICAL(&g_gcodeMux);
+}
+
 void teardown()
 {
+    dropQueuedGcode();
     if (g_mqtt && g_mqtt->connected()) g_mqtt->disconnect();
     if (g_tls) g_tls->stop();
     // Hand the RX high-water buffer (up to 64 KB) back while the link is down.
@@ -230,6 +307,10 @@ void printerTask(void*)
 
         g_mqtt->loop();
 
+        // One line per pass: a burst of publishes would starve the socket that
+        // has to carry the printer's 16 KB reports.
+        publishOneGcode();
+
         const uint32_t pushallMs = pushallIntervalMs(c);
         if (pushallMs != 0 && (millis() - g_lastPushallMs) >= pushallMs) {
             publishPushall();
@@ -279,6 +360,40 @@ void printerLinkStart()
     // ArduinoJson parse of a ~16 KB report. BLLED uses the same size in the field.
     xTaskCreatePinnedToCore(printerTask, "printer", 20480, nullptr, 1, &g_task, 1);
     if (!g_task) LOGE("printer: task creation failed");
+}
+
+bool printerLinkSendGcode(const char* gcode)
+{
+    if (!gcode || !*gcode) return false;
+    const size_t len = strlen(gcode);
+    if (len >= PRINTER_GCODE_MAX) {
+        LOGW("printer: gcode line too long (%u bytes)", (unsigned)len);
+        return false;
+    }
+    if (!printerLinkConfigured()) return false;
+
+    portENTER_CRITICAL(&g_gcodeMux);
+    const uint8_t next = (uint8_t)((g_gcodeHead + 1) % kGcodeSlots);
+    const bool full = next == g_gcodeTail;
+    if (!full) {
+        memcpy(g_gcodeQ[g_gcodeHead].text, gcode, len + 1);
+        g_gcodeHead = next;
+    }
+    portEXIT_CRITICAL(&g_gcodeMux);
+
+    if (full) {
+        LOGW("printer: gcode queue full, dropped '%s'", gcode);
+        return false;
+    }
+    return true;
+}
+
+uint8_t printerLinkGcodePending()
+{
+    portENTER_CRITICAL(&g_gcodeMux);
+    const uint8_t n = (uint8_t)((g_gcodeHead + kGcodeSlots - g_gcodeTail) % kGcodeSlots);
+    portEXIT_CRITICAL(&g_gcodeMux);
+    return n;
 }
 
 bool printerLinkConfigured() { return configured(linkCfg()); }

@@ -1,0 +1,138 @@
+site_name: BLSmartFlow
+site_description: >-
+  ESP32 fan controller for Bambu Lab printers - temperature curves, a chamber
+  thermostat and filament-aware cooling, driven from the printer's own local MQTT link.
+site_url: https://pwsh.github.io/BLSmartFlow/
+site_author: BLSmartFlow contributors
+copyright: >-
+  Firmware and documentation CC BY-NC-SA 4.0 &middot;
+  Material data from the Filament Field Guide, CC BY 4.0
+
+repo_url: https://github.com/pwsh/BLSmartFlow
+repo_name: pwsh/BLSmartFlow
+edit_uri: ""
+
+docs_dir: site
+site_dir: build/site
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.tooltips
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+
+plugins:
+  - search
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Link to this section
+  - pymdownx.blocks.caption
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/pwsh/BLSmartFlow
+      name: BLSmartFlow on GitHub
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - What you need: getting-started/what-you-need.md
+      - Flashing the firmware: getting-started/flashing.md
+      - First-time setup: getting-started/first-setup.md
+      - Connecting the printer: getting-started/connect-printer.md
+      - Your first fan curve: getting-started/first-fan-curve.md
+  - Using BLSmartFlow:
+      - Dashboard: using/dashboard.md
+      - Fan modes: using/fan-modes.md
+      - Fan curve editor: using/fan-curve-editor.md
+      - Printer state rules: using/printer-state-rules.md
+      - Filament-aware cooling: using/filament-aware-cooling.md
+      - Manual override: using/manual-override.md
+      - Post-print cool-down: using/post-print-cooldown.md
+      - Home Assistant: using/home-assistant.md
+      - Updating the firmware: using/updating.md
+      - Backup and security: using/backup-security.md
+      - The status LED: using/status-led.md
+  - Technical articles:
+      - Architecture: technical/architecture.md
+      - Control loop: technical/control-loop.md
+      - Chamber thermostat: technical/chamber-thermostat.md
+      - Post-print cool-down: technical/post-print-cooldown.md
+      - Cooling-rate learning: technical/cooling-rate-learning.md
+      - Filament matching: technical/filament-matching.md
+      - Printer link: technical/printer-link.md
+      - REST API: technical/rest-api.md
+      - MQTT and Home Assistant: technical/mqtt-and-home-assistant.md
+      - WiFi and captive portal: technical/wifi-and-captive-portal.md
+      - Building and testing: technical/building-and-testing.md
+      - Partitions and OTA: technical/partitions-and-ota.md
+      - Hardware: technical/hardware.md
+  - Troubleshooting:
+      - WiFi: troubleshooting/wifi.md
+      - Printer link: troubleshooting/printer-link.md
+      - Door not reported: troubleshooting/door-not-reported.md
+      - Fan behaviour: troubleshooting/fan-behaviour.md
+      - Web UI: troubleshooting/web-ui.md
+      - Recovery: troubleshooting/recovery.md
+      - LED patterns: troubleshooting/led-patterns.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - Changelog: reference/changelog.md
+      - Credits and licence: reference/credits-and-license.md

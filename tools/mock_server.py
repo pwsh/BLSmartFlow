@@ -4,7 +4,10 @@ BLSmartFlow 2.0 — API mock server (stdlib only).
 
 Implements every /api/* route of docs/REWORK-SPEC.md section 9 against an
 in-memory config (section 5) plus a simulated printer and fan controller
-(section 6), so src/www/index.html can be developed without hardware.
+(section 6), so src/www/index.html can be developed without hardware. That
+includes the post-print cool-down session of section 17: sessions run against the
+same chamber model, and every M106 the firmware would publish is logged as
+"printer <- M106 ...".
 
     python3 tools/mock_server.py [--port 8080] [--ap] [--offline] [--auth user:pass] [--door]
 
@@ -38,7 +41,7 @@ FILAMENT_DB_H = os.path.join(ROOT, "src", "blflow", "filament_db.h")
 AMS_FIXTURE = os.path.join(ROOT, "test", "fixtures", "x1c_ams_trays.json")
 
 CHIP_ID = "a1b2c3"
-FW = "2.0.2"
+FW = "2.0.3"
 BUILD = "2026-08-26 12:00:00"
 MASK = "********"
 SECRET_PATHS = (("wifi", "password"), ("printer", "accessCode"),
@@ -258,9 +261,9 @@ def load_ams_fixture():
 def default_config():
     return {
         "version": 2,
-        "wifi": {"ssid": "Holzhouse", "password": "hunter2hunter2", "bssid": "a4:2b:b0:11:22:33",
+        "wifi": {"ssid": "Workshop-WiFi", "password": "correct-horse-battery", "bssid": "02:00:5e:10:20:30",
                  "lockBssid": False, "hostname": "blsmartflow"},
-        "printer": {"ip": "10.0.1.42", "accessCode": "12345678", "serial": "01P00A000000001",
+        "printer": {"ip": "192.168.1.42", "accessCode": "12345678", "serial": "01P00A000000001",
                     "model": "auto"},
         "fan": {
             "curve": [{"temp": 0, "speed": 0}, {"temp": 50, "speed": 0},
@@ -287,6 +290,12 @@ def default_config():
         "filament": {"auto": True, "manualId": "",
                      "ventFloor": {"optional": 0, "recommended": 0, "required": 10},
                      "overrides": []},
+        # post-print cool-down (spec 17.1): the session is on, borrowing the
+        # printer's own fans is opt-in because it is the one thing here that
+        # sends commands to the printer.
+        "cooldown": {"enabled": True, "target": 35, "usePrinterFans": False,
+                     "auxSpeed": 100, "chamberFanSpeed": 100, "maxMinutes": 30,
+                     "gentleFromFilament": True, "ownFan": "thermostat"},
         # learned cooling constants: 5 closed buckets then 5 open ones, null = unmeasured
         "thermal": {"k": [None] * 10, "samples": 0},
     }
@@ -433,6 +442,13 @@ def validate_config(cfg):
                    if r.get("postPrintCooling") in ("fast", "gentle") else None})
     fil["overrides"] = ov
 
+    cd = cfg.setdefault("cooldown", {})
+    _clamp_num(cd, "target", 15, 60, int)
+    _clamp_num(cd, "auxSpeed", 0, 100, int)
+    _clamp_num(cd, "chamberFanSpeed", 0, 100, int)
+    _clamp_num(cd, "maxMinutes", 1, 240, int)
+    cd["ownFan"] = _enum(cd.get("ownFan"), ("thermostat", "max", "curve"), "thermostat")
+
     m = cfg.setdefault("mqtt", {})
     _clamp_num(m, "publishIntervalSec", 1, 3600, int)
     if isinstance(m.get("baseTopic"), str):
@@ -544,7 +560,14 @@ SCENARIO = [("IDLE", 60, -1), ("PREPARE", 18, 2), ("RUNNING", 150, 0),
 # its target about half a minute in, settles near 50 C with the fan off, and can
 # be pulled back to the low forties by the thermostat.
 K_BASE, K_FAN, K_DOOR = 0.25, 0.55, 0.60
+# The printer's own aux and chamber fans (spec 17): they sit inside the enclosure
+# and move considerably more air through it than an external duct fan, which is
+# the whole reason for borrowing them.
+K_PRINTER_FAN = 0.90
 CHAMBER_HEAT_C_PER_SEC = 0.20
+COOLDOWN_SAMPLE_SEC = 5.0
+COOLDOWN_REASSERT_SEC = 30.0
+COOLDOWN_LINK_GRACE_SEC = 30.0
 
 
 class Sim:
@@ -597,6 +620,24 @@ class Sim:
         self.pi_last = 0.0
         self.pi_out = 0.0
         self.door_rule_until = 0.0             # doorResumeSec anti-flap deadline
+        # post-print cool-down session (spec 17.2)
+        self.cd_active = False
+        self.cd_manual = False
+        self.cd_started = 0.0
+        self.cd_start_chamber = None
+        self.cd_target = 35
+        self.cd_reason = None
+        self.cd_sent_on = False
+        self.cd_ever_sent = False
+        self.cd_aux = 0
+        self.cd_chamber_fan = 0
+        self.cd_last_send = 0.0
+        self.cd_at_target = 0
+        self.cd_link_lost_at = None
+        self.cd_material = None
+        self.cd_prev_phase = None
+        self.cd_last_step = 0.0
+        self.cd_command = None                 # "start" / "stop", latched by the API
         # cooling-rate learning (spec 15.4)
         self.win = None                        # dict(start, t0, last, tlast, out, door)
         self.rate_c_per_min = None
@@ -720,6 +761,9 @@ class Sim:
         amb = float(self.cfg["fan"]["ambientTemp"])
         out = getattr(self, "effective_output", self.output)
         k = K_BASE + K_FAN * clamp(out, 0, 100) / 100.0 + (K_DOOR if self.door() else 0.0)
+        if self.cd_sent_on:
+            # spec 17: M106 P2/P3 are actually moving air inside the enclosure
+            k += K_PRINTER_FAN * (self.cd_aux + self.cd_chamber_fan) / 200.0
         heat = CHAMBER_HEAT_C_PER_SEC if self.b_target > 0 else 0.0
         self.chamber += (heat - k / 60.0 * (self.chamber - amb)) * dt
         self.chamber = clamp(self.chamber, amb - 1.0, 70.0)
@@ -860,11 +904,20 @@ class Sim:
         # 4. preheat: the fan would be fighting the heaters.
         preheat_rule = f["preheatMode"] != "ignore" and phase == "preheat"
 
+        # spec 17.2: while a session runs it owns the device's own fan, unless
+        # ownFan is "curve" (= do not interfere)
+        cd_max = self.cd_active and self.cfg["cooldown"]["ownFan"] == "max"
+        cd_pi = (self.cd_active and self.cfg["cooldown"]["ownFan"] == "thermostat"
+                 and self.chamber is not None)
+
         # 5. chamber thermostat
-        thermostat = f["mode"] == "chamber" and st is not None and self.chamber is not None
+        thermostat = ((f["mode"] == "chamber" or cd_pi) and st is not None
+                      and self.chamber is not None)
         cooling_phase = phase in ("finished", "cooling") or (phase == "idle" and recent_print)
         sp = None
-        if thermostat:
+        if cd_pi:
+            sp = float(self.cd_target)
+        elif thermostat:
             if phase in ("preheat", "printing", "paused"):
                 sp = float(eff["chamberTarget"])
             elif cooling_phase:
@@ -884,6 +937,10 @@ class Sim:
         elif preheat_rule:
             mode = "preheat"
             tgt = float(f["preheatSpeed"]) if f["preheatMode"] == "fixed" else 0.0
+        elif cd_max:
+            mode, tgt = "cooldown", 100.0
+        elif cd_pi:
+            mode, tgt = "cooldown", self._thermostat(sp, f, now)
         elif thermostat and sp is None:
             mode, tgt = "idle", 0.0
         elif thermostat:
@@ -993,6 +1050,136 @@ class Sim:
         elif span >= self.MIN_WINDOW_SEC * 5:
             self.win = None
 
+    # ---------------- post-print cool-down (spec 17.2) ----------------
+    def cd_gcode_safe(self):
+        return self.printer_connected and self.state_name() in ("FINISH", "IDLE")
+
+    def cd_gcode_busy(self):
+        return self.printer_connected and self.state_name() in (
+            "RUNNING", "PAUSE", "PREPARE", "SLICING")
+
+    def cd_send_fans(self, aux, chamber):
+        """The mock's stand-in for printerLinkSendGcode(): it logs the exact line
+        the firmware would publish as a `gcode_line` request."""
+        BUS.log("I", "printer <- M106 P2 S%d M106 P3 S%d"
+                % (round(aux * 255 / 100.0), round(chamber * 255 / 100.0)))
+
+    def cd_stop(self, reason, send_stop):
+        self.cd_active = False
+        self.cd_reason = reason
+        if send_stop and self.cd_ever_sent and self.cd_gcode_safe():
+            self.cd_send_fans(0, 0)
+        self.cd_sent_on = False
+        self.cd_aux = self.cd_chamber_fan = 0
+        BUS.log("I", "cooldown: finished (%s)" % reason)
+
+    def tick_cooldown(self, now):
+        """Mirrors cooldownStep() in cooldown_logic.h - one sample every 5 s, plus
+        an immediate pass whenever the API has latched a command."""
+        cmd, self.cd_command = self.cd_command, None
+        if cmd is None and self.cd_last_step and now - self.cd_last_step < COOLDOWN_SAMPLE_SEC:
+            return
+        self.cd_last_step = now
+
+        c = self.cfg["cooldown"]
+        eff = self.filament()["effective"]
+        phase = self.phase()
+        prev = self.cd_prev_phase if self.cd_prev_phase is not None else phase
+        self.cd_prev_phase = phase
+        busy = self.printing() or self.cd_gcode_busy()
+        online = self.printer_connected and self.ever_updated
+
+        if not self.cd_active:
+            start = False
+            if cmd == "start" and not busy:
+                start, self.cd_manual = True, True
+            elif c["enabled"] and cmd != "stop" and not busy:
+                # the edge, not the level: a session the user stopped must not
+                # restart while the printer sits at FINISH
+                start = (phase in ("finished", "cooling")
+                         and prev not in ("finished", "cooling"))
+                self.cd_manual = False
+            if not start:
+                return
+            self.cd_active = True
+            self.cd_started = now
+            self.cd_start_chamber = self.chamber
+            self.cd_target = int(eff["cooldownTarget"] if self.cfg["filament"]["auto"]
+                                 else c["target"])
+            self.cd_reason = None
+            self.cd_sent_on = self.cd_ever_sent = False
+            self.cd_aux = self.cd_chamber_fan = 0
+            self.cd_last_send = now
+            self.cd_at_target = 0
+            self.cd_link_lost_at = None
+            self.cd_material = self.filament()["id"] or None
+            BUS.log("I", "cooldown: started, chamber %.1f -> %d C"
+                    % (self.chamber, self.cd_target))
+
+        if busy:                                  # the print owns its fans again
+            return self.cd_stop("newJob", False)
+        if cmd == "stop":
+            return self.cd_stop("stopped", True)
+        if not c["enabled"] and not self.cd_manual:
+            return self.cd_stop("disabled", True)
+        if not online:
+            if self.cd_link_lost_at is None:
+                self.cd_link_lost_at = now
+            if now - self.cd_link_lost_at > COOLDOWN_LINK_GRACE_SEC:
+                return self.cd_stop("linkLost", False)
+        else:
+            self.cd_link_lost_at = None
+        if now - self.cd_started >= c["maxMinutes"] * 60:
+            return self.cd_stop("timeout", True)
+        if self.chamber is not None and self.chamber <= self.cd_target:
+            self.cd_at_target += 1
+        else:
+            self.cd_at_target = 0
+        if self.cd_at_target >= 2:
+            return self.cd_stop("target", True)
+
+        allowed = c["usePrinterFans"] and online and self.cd_gcode_safe()
+        gentle = False
+        if allowed and c["gentleFromFilament"] and eff["postPrintCooling"] == "gentle":
+            if self.chamber is None or self.chamber >= eff["chamberTarget"] - 10:
+                allowed = False
+            else:
+                gentle = True
+        if allowed:
+            aux = c["auxSpeed"] // 2 if gentle else c["auxSpeed"]
+            cha = c["chamberFanSpeed"] // 2 if gentle else c["chamberFanSpeed"]
+            changed = (not self.cd_sent_on or aux != self.cd_aux
+                       or cha != self.cd_chamber_fan)
+            due = self.cd_sent_on and now - self.cd_last_send >= COOLDOWN_REASSERT_SEC
+            if changed or due:
+                self.cd_send_fans(aux, cha)
+                self.cd_sent_on = self.cd_ever_sent = True
+                self.cd_aux, self.cd_chamber_fan = aux, cha
+                self.cd_last_send = now
+        elif self.cd_sent_on:
+            if self.cd_gcode_safe():
+                self.cd_send_fans(0, 0)
+            self.cd_sent_on = False
+            self.cd_aux = self.cd_chamber_fan = 0
+
+    def cd_status(self):
+        now = time.monotonic()
+        c = self.cfg["cooldown"]
+        return {
+            "active": self.cd_active,
+            "reason": self.cd_reason,
+            "target": self.cd_target if self.cd_active else c["target"],
+            "chamber": round(self.chamber, 1) if self.chamber is not None else None,
+            "startChamber": round(self.cd_start_chamber, 1)
+            if self.cd_start_chamber is not None else None,
+            "elapsedSec": int(now - self.cd_started) if self.cd_active else 0,
+            "maxSec": int(c["maxMinutes"]) * 60,
+            "printerFans": {"aux": self.cd_aux, "chamber": self.cd_chamber_fan,
+                            "sent": self.cd_sent_on},
+            "ownFan": c["ownFan"],
+            "material": self.cd_material if self.cd_active else None,
+        }
+
     def _curve_target(self, st, f):
         if self.held_temp is None or abs(st - self.held_temp) >= f["hysteresis"]:
             self.held_temp = st
@@ -1016,11 +1203,11 @@ class Sim:
                            "heapFree": 148000 + random.randint(-3000, 3000),
                            "heapMin": 121344, "chipId": CHIP_ID,
                            "hostname": self.cfg["wifi"]["hostname"],
-                           "ip": "192.168.4.1" if ap else "10.0.1.57", "apMode": ap},
+                           "ip": "192.168.4.1" if ap else "192.168.1.50", "apMode": ap},
                 "wifi": {"connected": connected,
                          # empty while in AP mode / not associated
                          "ssid": self.cfg["wifi"]["ssid"] if connected else "",
-                         "bssid": "A4:2B:B0:11:22:33" if connected else "",
+                         "bssid": "02:00:5E:10:20:30" if connected else "",
                          "rssi": 0 if ap else -58 + random.randint(-6, 6),
                          "channel": 0 if ap else 6},
                 "printer": {
@@ -1036,7 +1223,7 @@ class Sim:
                     "stage": cnt["stage"], "stageText": cnt["stageText"],
                     "progress": cnt["progress"], "remainingMin": cnt["remainingMin"],
                     "layer": cnt["layer"], "totalLayers": cnt["totalLayers"],
-                    "task": "Benchy.3mf" if self.printer_connected else "",
+                    "task": "Bracket_v3.3mf" if self.printer_connected else "",
                     "phase": self.phase(),
                     # null until an edge has proved the switch reports at all
                     "doorOpen": self.door_open if self.door_known else None,
@@ -1059,6 +1246,8 @@ class Sim:
                         "pwmDuty": self.pwm_duty(), "output1": f["output1"],
                         "output2": f["output2"]},
                 "filament": self.filament(),
+                # post-print cool-down session (spec 17.3)
+                "cooldown": self.cd_status(),
                 # NaN is never emitted: an unmeasured bucket is JSON null
                 "thermal": {"rateCPerMin": self.rate_c_per_min,
                             "kClosed": [round(k, 3) if k is not None else None
@@ -1078,6 +1267,8 @@ class Sim:
             self.last_tick = now
             with self.lock:
                 self.tick_printer(dt)
+                # before the fan: a running session decides what the fan does
+                self.tick_cooldown(now)
                 self.tick_fan(dt)
                 self.tick_thermal(now)
                 if self.cfg["mqtt"]["enabled"] and not self.mqtt_ext_connected:
@@ -1101,11 +1292,11 @@ class Sim:
 
 # the ESP32 radio is 2.4 GHz only, so a scan never returns a 5 GHz channel
 NETWORKS = [
-    {"ssid": "Holzhouse", "bssid": "A4:2B:B0:11:22:33", "rssi": -47, "channel": 6, "secure": True},
-    {"ssid": "FRITZ!Box 7590 QT", "bssid": "3C:A6:2F:AA:BB:CC", "rssi": -68, "channel": 11, "secure": True},
-    {"ssid": "Printer-Farm", "bssid": "DE:AD:BE:EF:00:12", "rssi": -74, "channel": 1, "secure": True},
-    {"ssid": "Gastnetz", "bssid": "DE:AD:BE:EF:00:13", "rssi": -79, "channel": 1, "secure": False},
-    {"ssid": "Vodafone-Hotspot", "bssid": "00:11:22:33:44:55", "rssi": -88, "channel": 13, "secure": False},
+    {"ssid": "Workshop-WiFi", "bssid": "02:00:5E:10:20:30", "rssi": -47, "channel": 6, "secure": True},
+    {"ssid": "Home-Network", "bssid": "02:00:5E:10:20:31", "rssi": -68, "channel": 11, "secure": True},
+    {"ssid": "Garage-IoT", "bssid": "02:00:5E:10:20:32", "rssi": -74, "channel": 1, "secure": True},
+    {"ssid": "Guest", "bssid": "02:00:5E:10:20:33", "rssi": -79, "channel": 1, "secure": False},
+    {"ssid": "Cafe-Free", "bssid": "02:00:5E:10:20:34", "rssi": -88, "channel": 13, "secure": False},
 ]
 
 # --------------------------------------------------------------------------
@@ -1264,6 +1455,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._post_fan()
             if p == "/api/wifi":
                 return self._post_wifi()
+            if p == "/api/cooldown":
+                b = self._json_body()
+                if not isinstance(b.get("start"), bool):
+                    return self._err('expected {"start":true|false}')
+                with sim.lock:
+                    if b["start"] and sim.printing():
+                        return self._err("printer is busy")
+                    sim.cd_command = "start" if b["start"] else "stop"
+                    sim.tick_cooldown(time.monotonic())
+                    st = sim.cd_status()
+                return self._send({"ok": True, "cooldown": st})
             if p == "/api/restart":
                 BUS.log("W", "restart requested (mock: not restarting)")
                 return self._send({"ok": True})

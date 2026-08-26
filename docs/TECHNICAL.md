@@ -17,16 +17,17 @@ full HTTP / MQTT / serial contracts.
 3. [Configuration schema](#configuration-schema)
 4. [Fan control state machine](#fan-control-state-machine)
 5. [Filament-aware cooling](#filament-aware-cooling)
-6. [Printer link](#printer-link)
-7. [REST API reference](#rest-api-reference)
-8. [MQTT / Home Assistant reference](#mqtt--home-assistant-reference)
-9. [Serial provisioning protocol](#serial-provisioning-protocol)
-10. [WiFi, AP and captive portal](#wifi-ap-and-captive-portal)
-11. [Security notes](#security-notes)
-12. [Building and testing](#building-and-testing)
-13. [Partitions and OTA](#partitions-and-ota)
-14. [Hardware](#hardware)
-15. [Known limitations](#known-limitations)
+6. [Post-print cool-down](#post-print-cool-down)
+7. [Printer link](#printer-link)
+8. [REST API reference](#rest-api-reference)
+9. [MQTT / Home Assistant reference](#mqtt--home-assistant-reference)
+10. [Serial provisioning protocol](#serial-provisioning-protocol)
+11. [WiFi, AP and captive portal](#wifi-ap-and-captive-portal)
+12. [Security notes](#security-notes)
+13. [Building and testing](#building-and-testing)
+14. [Partitions and OTA](#partitions-and-ota)
+15. [Hardware](#hardware)
+16. [Known limitations](#known-limitations)
 
 ---
 
@@ -149,6 +150,9 @@ are used. `CONFIG_VERSION` is `2`.
   "mqtt": { "enabled": false, "host": "", "port": 1883, "user": "", "password": "",
             "baseTopic": "", "haDiscovery": true, "haPrefix": "homeassistant",
             "publishIntervalSec": 10 },
+  "cooldown": { "enabled": true, "target": 35, "usePrinterFans": false,
+                "auxSpeed": 100, "chamberFanSpeed": 100, "maxMinutes": 30,
+                "gentleFromFilament": true, "ownFan": "thermostat" },
   "web":   { "authEnabled": false, "user": "admin", "password": "" },
   "debug": { "serial": true, "mqttDump": false },
   "ssdp":  { "enabled": true }
@@ -203,6 +207,13 @@ are used. `CONFIG_VERSION` is `2`.
 | `filament.overrides` | ≤ 12 rules | `[]` | `{"id","chamberTarget","cooldownTarget","ventFloor","postPrintCooling"}`. `id` is a guide id or `"*"`; every other field is optional and `null` means "keep". Rules with an empty `id` are dropped; the array is **replaced** wholesale by a `POST /api/config`, never merged element-wise |
 | `thermal.k` | float[10] | 10 × `null` | Learned Newtonian cooling constants in 1/min: five closed-door buckets (0/25/50/75/100 % fan) then five open-door ones. `null`/NaN = never measured; anything outside `(0, 5]` is reset to `null` |
 | `thermal.samples` | uint32 | `0` | Number of windows blended in so far. Learned, not configured — but it survives a backup/restore round trip |
+| `cooldown.enabled` | bool | `true` | Start a session automatically on the phase edge into `finished`/`cooling`. A manual start works regardless |
+| `cooldown.target` | uint8 °C | `35` | 15–60. **Overridden by the material's `cooldownTarget`** whenever `filament.auto` is on, so a per-material override reaches the session too |
+| `cooldown.usePrinterFans` | bool | `false` | Send `M106` to the printer. Off by default: it is the only setting that makes the firmware command the printer rather than read from it |
+| `cooldown.auxSpeed` / `chamberFanSpeed` | uint8 % | `100` / `100` | 0–100. Sent as `M106 P2` / `M106 P3`, converted to the printer's 0–255 scale |
+| `cooldown.maxMinutes` | uint16 min | `30` | 1–240. A hard stop, so a session on a chamber that will never reach the target cannot run for ever |
+| `cooldown.gentleFromFilament` | bool | `true` | Honour `postPrintCooling == "gentle"`: printer fans stay off until the chamber is 10 °C below the chamber target, then run at **half** the configured percentages |
+| `cooldown.ownFan` | enum | `thermostat` | `thermostat｜max｜curve` — what the *device's* own fan does during a session. Stored as the `CD_OWN_*` enum, serialised as the string |
 | `mqtt.enabled` | bool | `false` | Forced to `false` when `host` is empty |
 | `mqtt.host` / `port` | `char[64]` / uint16 | `""` / `1883` | Port `0` ⇒ `1883`. Plain TCP, no TLS |
 | `mqtt.user` / `password` | `char[33]` / `char[65]` | `""` | Password is a secret (masked). Empty user ⇒ anonymous connect |
@@ -548,6 +559,114 @@ on the next 100 ms pass. It then feeds four things:
 
 ---
 
+## Post-print cool-down
+
+REWORK-SPEC §17. After a print the printer reports `FINISH` and stops driving its own fans, but the
+chamber is still full of heat. A *session* empties it down to a target — and, if the user opts in,
+borrows the printer's own auxiliary and chamber fans, which sit inside the enclosure and move far
+more air than an external duct fan.
+
+This is the only feature in the firmware that **writes** to the printer. Everything about it is
+built around that: `usePrinterFans` defaults to `false`, commands only ever leave the device while
+the printer reports `FINISH` or `IDLE`, and a printer that goes back to work ends the session
+immediately *without* sending anything.
+
+### Pieces
+
+| File | Role |
+|---|---|
+| `cooldown_logic.h` | The whole state machine as one pure function. Arduino-free (it depends only on `printer_parse.h` for `Phase`), so `test/test_cooldown` runs the exact code the device runs |
+| `cooldown.cpp` | Plumbing: the 5 s sample tick on the loop task, config/filament lookups, the command latch shared with the API and MQTT tasks, the status snapshot |
+| `printer_link.cpp` | `printerLinkSendGcode()` and the spinlock-guarded queue the printer task drains |
+| `fan_control.cpp` | Reads `cooldownFanRequest()` and implements `ownFan` |
+
+### The state machine (`cooldownStep`)
+
+```
+CooldownActions cooldownStep(CooldownState&, const CooldownInputs&, const CooldownRules&, uint32_t nowMs)
+```
+
+The caller owns the state, hands in a snapshot of the world, and gets back *actions*: `startedNow`,
+`stoppedNow` + `reason`, `sendFans` + `auxPct`/`chamberPct`, `sendStop`. Nothing inside touches
+MQTT, the fan or the clock.
+
+**Start** — either the phase *edge* into `finished`/`cooling` (when `enabled`), or an explicit
+`CooldownCommand::Start` at any time the phase is not `preheat`/`printing`/`paused`. The edge
+matters: on the level alone, a session the user stopped would restart on the very next sample while
+the printer still sat at `FINISH`. A manual session records `manual = true` and survives
+`enabled` being switched off; an automatic one ends with `reason = "disabled"`.
+
+**Run**, every 5 s:
+
+1. `usePrinterFans` **and** the link is online **and** `gcode_state ∈ {FINISH, IDLE}`, else nothing
+   is sent. An *unknown* state (a printer that has not reported since boot) is not the same as a
+   busy one: it blocks G-code without killing a session the user asked for by hand.
+2. The gentle rule (`gentleFromFilament` and the material's `postPrintCooling == "gentle"`): the
+   printer's fans stay off while `chamber >= chamberTarget − 10`, then run at half speed.
+3. Send when the requested value **changed**, or when 30 s have passed since the last send — the
+   printer resets its fans on its own schedule, so a command that is never repeated quietly stops
+   being true.
+
+**Stop**, in this order of urgency:
+
+| Order | Condition | `reason` | Stop command sent? |
+|---|---|---|---|
+| 1 | Phase ∈ {preheat, printing, paused} or `gcode_state` ∈ {RUNNING, PAUSE, PREPARE, SLICING} | `newJob` | **No** — the print has just set the fans it wants |
+| 2 | `CooldownCommand::Stop` (API / MQTT / UI) | `stopped` | Yes, if the fans were ever turned on |
+| 3 | `enabled` switched off under an automatic session | `disabled` | Yes, if ever on |
+| 4 | Link down for more than 30 s | `linkLost` | No — there is nothing to send it over |
+| 5 | `maxMinutes` elapsed | `timeout` | Yes, if ever on |
+| 6 | `chamber <= target` on **two consecutive samples** | `target` | Yes, if ever on |
+
+The two-sample hold is why the loop takes samples rather than timestamps: a probe that dips a tenth
+of a degree for one reading must not end a cool-down with five minutes of real work left.
+
+### The device's own fan (`ownFan`)
+
+`cooldownFanRequest()` publishes `{active, ownFan, target}` under a spinlock; `fanControlLoop()`
+reads it every 100 ms. It sits **below** `off`/`manual`/`stale`/`door`/`preheat` in the evaluation
+order and above the chamber thermostat:
+
+* `thermostat` — the same PI step as chamber mode (`thermostat.h`), set point = the session's
+  target. `effectiveMode` becomes `cooldown` and `fan.setpoint` reports the session's target.
+* `max` — 100 %, for a duct fan with one useful setting.
+* `curve` — the session does not touch the fan at all; only the printer's fans are commanded.
+
+The filament gentle cap (0 % until 10 °C below the chamber target, then ≤ 50 %) still applies to the
+device's own fan while `effectiveMode == "cooldown"`, exactly as in 2.0.2.
+
+### The G-code queue
+
+`printerLinkSendGcode(const char*)` copies the text into a **4-slot ring of 96-byte lines** under a
+`portMUX` critical section and returns `false` when the queue is full, the line is too long or the
+printer is unconfigured. The caller never blocks and never retries in place — the session re-asserts
+on its next sample anyway.
+
+The printer task publishes **one line per pass**, after `g_mqtt->loop()`:
+
+```jsonc
+{"print":{"sequence_id":"<n>","command":"gcode_line","param":"M106 P2 S255\nM106 P3 S255\n"}}
+```
+
+to `device/<serial>/request`, with `sequence_id` incrementing per published line. The payload is
+built with ArduinoJson rather than `snprintf`, because the `param` carries real newlines. A failed
+publish is logged and the slot is **kept**, so the next pass retries it; a teardown (reconnect or
+reconfigure) drops the whole queue, since a fan command for a printer state we can no longer vouch
+for is not worth sending late. Successful publishes are logged as `printer <- M106 P2 S255 M106 P3
+S255` (newlines flattened to spaces so one command is one log line).
+
+Both fans go out in a single `param`: the printer applies a `gcode_line` as a unit, and sending them
+separately would leave a window with the aux fan running and the chamber fan not.
+
+### Concurrency
+
+The state machine has one owner at a time. Normally that is the loop task; `POST /api/cooldown` runs
+a step **inline** on the AsyncTCP task so its response can describe the session it just started,
+which is why `cooldown.cpp` holds a real recursive mutex rather than a "loop task only" convention.
+The published status snapshot is a POD copied under a `portMUX`, like `PrinterState`.
+
+---
+
 ## Printer link
 
 * `WiFiClientSecure::setInsecure()` (the printer presents a self-signed certificate), port **8883**,
@@ -562,6 +681,9 @@ on the next 100 ms pass. It then feeds four things:
   `device/<serial>/request`.
 * **`pushall` cadence**: `p1`/`a1` → every 5 minutes; `auto` → every 10 minutes; `x1`/`h2d` → never
   (they push complete reports themselves).
+* **Outgoing G-code** (2.0.3): `printerLinkSendGcode()` queues a line into a 4 × 96-byte spinlock-
+  guarded ring; the task publishes one per pass as a `gcode_line` request with an incrementing
+  `sequence_id`. See [Post-print cool-down](#post-print-cool-down).
 * `printerLinkReconfigure()` tears the session down **only** when `ip`, `accessCode` or `serial`
   changed; `staleSec` and `debug.mqttDump` are picked up in place, so toggling a debug switch does
   not drop the link.
@@ -709,6 +831,24 @@ curl -X POST -d '{"mode":"auto"}' $H/api/fan
 * `durationSec > 0` with `mode: "manual"` creates a temporary override (not persisted, clamped to
   86400 s). `durationSec == 0` persists mode and speed through the **deferred** save.
 
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `POST` | `/api/cooldown` | `{"start":true｜false}` | `{"ok":true,"cooldown":{…}}` (the `cooldown` section of the status object) |
+
+```sh
+curl -X POST -d '{"start":true}'  $H/api/cooldown
+curl -X POST -d '{"start":false}' $H/api/cooldown
+```
+
+* `start` is required and must be a boolean: anything else is `400 {"error":"expected
+  {\"start\":true|false}"}`.
+* Starting while a print is running is `400 {"error":"printer is busy"}` — the phase, not
+  `gcode_state`, decides (see [Print phase](#print-phase)).
+* Stopping an idle session is a no-op that still returns `200`.
+* The session state machine is stepped **inline**, so the returned `cooldown` block already
+  describes the session that was just started or stopped. Nothing is persisted: this is a command,
+  not a setting.
+
 ### Network
 
 | Method | Path | Body | Response |
@@ -827,6 +967,10 @@ retained to `<base>/state`.
                "temps": { "nozzle":220.4, "nozzleTarget":220, "bed":60.1, "bedTarget":60,
                           "chamber":38.0, "chamberTarget":45.0 },
                "fans":  { "part":100, "aux":0, "chamber":40, "heatbreak":100 } },
+  "cooldown":{ "active":true, "reason":null, "target":35, "chamber":41.2, "startChamber":52.0,
+               "elapsedSec":120, "maxSec":1800,
+               "printerFans": { "aux":100, "chamber":100, "sent":true },
+               "ownFan":"thermostat", "material":"abs" },
   "fan":     { "output":55, "target":55, "mode":"auto", "effectiveMode":"auto", "source":"nozzle",
                "sourceTemp":220.4, "setpoint":null, "chamberTarget":45, "cooldownTarget":35,
                "manualSpeed":50, "manualExpiresSec":0, "pwmDuty":140,
@@ -865,7 +1009,7 @@ retained to `<base>/state`.
 | `printer.doorEdgeCount` | Transitions seen since boot; the first report is state, not an edge |
 | `printer.temps.chamberTarget` | The printer's own chamber set point, `null` on machines without a chamber heater |
 | `fan.output` / `target` | Rounded percent actually driven / requested by the active mode |
-| `fan.effectiveMode` | `off｜manual｜stale｜door｜preheat｜idle｜cooldown｜chamber｜auto` |
+| `fan.effectiveMode` | `off｜manual｜stale｜door｜preheat｜idle｜cooldown｜chamber｜auto`. `cooldown` covers both the `onlyWhilePrinting` cool-down window and a post-print cool-down session |
 | `fan.setpoint` | Thermostat set point in force right now, `null` outside `chamber`/`cooldown` |
 | `fan.chamberTarget` / `cooldownTarget` | The **configured** set points, so the HA number entities have a state to read back |
 | `filament.source` | `ams｜external｜manual｜none` — where the active material came from |
@@ -876,6 +1020,14 @@ retained to `<base>/state`.
 | `filament.profile` | The guide's figures, or `null` when unmatched. `chamberRec`/`chamberMax`/`partCoolRec` are `null` individually where the guide has no figure |
 | `filament.effective` | What the fan controller is actually using this second. `overridden` is true when a `filament.overrides` rule changed at least one of them |
 | `filament.trays` | Every tray the printer has described, empty slots omitted. Feeds the UI's AMS list |
+| `cooldown.active` | A post-print cool-down session is running |
+| `cooldown.reason` | Why the **last** session ended: `target｜timeout｜newJob｜stopped｜linkLost｜disabled`, `null` when none has ended since boot |
+| `cooldown.target` | The target the running session is aiming at, or the configured `cooldown.target` when idle |
+| `cooldown.chamber` / `startChamber` | Chamber now, and when the session started. `null` on a printer without a chamber sensor |
+| `cooldown.elapsedSec` / `maxSec` | Session age and the hard limit (`maxMinutes × 60`) |
+| `cooldown.printerFans` | `{aux, chamber, sent}` — the percentages last commanded and whether they are believed to be running. `sent` is `false` whenever `usePrinterFans` is off, the gentle rule is holding them back, or the printer is not in a state where a command may be sent |
+| `cooldown.ownFan` | `thermostat｜max｜curve` — what the device's own fan is doing during the session |
+| `cooldown.material` | Guide id recorded when the session started, `null` when unknown or idle |
 | `thermal.rateCPerMin` | Current chamber slope in °C/min (negative = cooling), `null` until the fan output and door have been steady for ~20 s |
 | `thermal.kClosed` / `kOpen` | Learned cooling constants in 1/min for fan buckets 0/25/50/75/100 %; `null` where nothing has been measured — **never** NaN |
 | `thermal.samples` | Number of windows blended into the table so far |
@@ -913,6 +1065,7 @@ DNS timeout cannot stall the loop.
 | `<base>/chamber_target/set` | sub | `20`–`80` → `fan.chamberTarget` (clamped by `validate()`) |
 | `<base>/cooldown_target/set` | sub | `15`–`60` → `fan.cooldownTarget` |
 | `<base>/target/set` | sub | `{"chamberTarget":45,"cooldownTarget":35}` — either key may be omitted |
+| `<base>/cooldown/set` | sub | `ON` → start a post-print cool-down session, `OFF` → stop it. Refused (logged, no state change) while a print is running |
 | `<base>/restart` | sub | Any payload → restart |
 
 The set points come in two shapes because a Home Assistant `number` entity wants one topic per
@@ -944,6 +1097,7 @@ Discovery topic: `<haPrefix>/<component>/blsmartflow_<chipid>/<object_id>/config
 | `select` | `mode` | Options `auto`, `chamber`, `manual`, `off` |
 | `number` | `chamber_target` | 20–80 °C, `command_topic chamber_target/set`, state from `value_json.fan.chamberTarget` |
 | `number` | `cooldown_target` | 15–60 °C, `command_topic cooldown_target/set`, state from `value_json.fan.cooldownTarget` |
+| `switch` | `cooldown` | `command_topic cooldown/set`, state from `value_json.cooldown.active`. The switch is the *session*, not the setting: turning it off ends the session, it does not disable the feature |
 | `button` | `restart` | `payload_press: PRESS`, `device_class: restart` |
 | `sensor` | `nozzle_temp`, `bed_temp`, `chamber_temp` | °C, `device_class temperature`, `state_class measurement` |
 | `sensor` | `fan_output` | %, `state_class measurement` |
@@ -955,6 +1109,8 @@ Discovery topic: `<haPrefix>/<component>/blsmartflow_<chipid>/<object_id>/config
 | `sensor` | `device_rssi` | dBm, `device_class signal_strength` |
 | `sensor` | `uptime` | s, `device_class duration`, `state_class total_increasing` |
 | `sensor` | `filament` | State = the guide's display name (`unknown` when unmatched). Attributes come from the same retained `state` topic via `json_attributes_topic` + `json_attributes_template`: `type`, `idx`, `id`, `family`, `source`, `vent`, `chamberTarget`, `ventFloor`, `postPrintCooling` |
+| `sensor` | `cooldown_remaining` | min, `device_class duration`; `(maxSec − elapsedSec) / 60` rounded up while a session runs, `0` otherwise |
+| `sensor` | `cooldown_reason` | Why the last session ended, or `none` |
 | `sensor` | `filament_chamber_target` | °C, `device_class temperature`; the **effective** chamber target for the loaded material |
 | `binary_sensor` | `printer_online` | `device_class connectivity` |
 | `binary_sensor` | `door` | `device_class opening`. Publishes the literal `None` while `doorKnown` is false, which Home Assistant renders as *Unknown* — a stuck bit must not be reported as a shut door |
@@ -1138,7 +1294,7 @@ It then rewrites `firmware/manifest.json`: `version` from `custom_version`, and
 
 ### Tests
 
-`pio test -e native` runs six Unity suites against the Arduino-free headers:
+`pio test -e native` runs seven Unity suites against the Arduino-free headers:
 
 | Suite | Covers |
 |---|---|
@@ -1147,6 +1303,7 @@ It then rewrites `firmware/manifest.json`: `version` from `custom_version`, and
 | `test/test_buffer` | `AutoGrowBufferStream` (with local `Arduino.h` / `Stream.h` shims) |
 | `test/test_thermostat` | `thermostat.h`: proportional response, integral accumulation, the ±100/ki anti-windup clamp, the door and saturation freezes, and the printing → cool-down set-point switch |
 | `test/test_filament` | `filament_match.h` + the AMS half of `printer_parse.h`: **every row of `tools/bambu_filament_ids.csv`** resolved from its type and from its bare id, CF/GF fallbacks, support pairing, the `tray_now` and H2D `snow` encodings, the live AMS fixture, partial-report merging, AMS-HT unit ids, and the effective-profile rules including override precedence |
+| `test/test_cooldown` | `cooldown_logic.h`: the start edge, a manual start refused while printing, the `FINISH`/`IDLE` gate on every outgoing command, the gentle hold and its half-speed cap, the 30 s re-assert, and all six stop reasons with the right stop-command behaviour |
 | `test/test_thermal` | `thermal_math.h`: bucketing, the EMA blend, recovering a known cooling constant from a synthetic cool-down, and every reason a window is refused |
 
 Fixtures in `test/fixtures/` were captured from a live X1C and sanitised:
@@ -1186,6 +1343,12 @@ The fake AMS is the captured `test/fixtures/x1c_ams_trays.json`, and the mock re
 guide — one source of truth, so a regenerated database needs no change in the mock. It mirrors
 `filamentIdentify()` and `filamentEffective()` line for line, including the vent floor and the gentle
 cool-down.
+
+Post-print cool-down sessions run against the same chamber model: `POST /api/cooldown` starts and
+stops them, the printer's own fans add a further `K_PRINTER_FAN` term to `k` while they are
+"commanded", and every command is logged exactly as the firmware logs it —
+`[I] printer <- M106 P2 S255 M106 P3 S255`. That makes the whole opt-in path, including the gentle
+hold and the 30 s re-assert, visible in the UI's log box without a printer.
 
 `POST /mock/door` and `POST /mock/tray` are the two routes that are **not** part of the device API: `{"open":true}`,
 `{"open":false}` or `{"toggle":true}` stands in for someone opening the printer, so the door rules
@@ -1273,6 +1436,14 @@ solid = OK. A blink pattern is *N* × 200 ms on/off followed by an 800 ms gap.
   pieces.
 * **`fan.mode` is persisted**, so a device that was left in `manual` comes back in `manual` after a
   power cut; timed overrides deliberately do not survive a reboot.
+* **A cool-down session does not survive a reboot.** It lives in RAM only; a device that restarts
+  mid-session comes back with no session, and no new one starts, because the finish *edge* has
+  already gone by.
+* **The printer's fan state is not read back.** `cooldown.printerFans.sent` says what was commanded,
+  not what the printer did with it — which is exactly why the command is re-asserted every 30 s.
+* **`M106 P2`/`P3` are the X1-family mapping.** On a model where the auxiliary and chamber fans sit
+  on different `P` numbers the commands do nothing useful; the safe answer there is to leave
+  `cooldown.usePrinterFans` off.
 * **The door bit is best effort, and the top lid is not sensed at all.** On some X1C units the closed
   door never actuates the switch, so `home_flag` bit 23 stays at 1 for the whole session. Those
   machines never reach `doorKnown`, so `printer.doorOpen` stays `null`, `doorEdgeCount` stays 0 and
