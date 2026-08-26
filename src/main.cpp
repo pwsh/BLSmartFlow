@@ -1,104 +1,137 @@
+// BLSmartFlow 2.0 - firmware entry point.
+//
+// setup() brings the modules up in dependency order; loop() is a set of
+// non-blocking pumps. The only thing that ever blocks for long - the printer's
+// TLS MQTT session - lives in its own FreeRTOS task (see printer_link.cpp), so
+// an unreachable printer can never stall fan control or the web UI.
+
 #include <Arduino.h>
-#include "./blflow/web-server.h"
-#include "./blflow/mqttmanager.h"
-#include "./blflow/filesystem.h"
-#include "./blflow/types.h"
-#include "./blflow/fans.h"
-#include "./blflow/serialmanager.h"
-#include "./blflow/wifi-manager.h"
-#include "./blflow/ssdp.h"
-#include "./blflow/indicator.h"
+#include <LittleFS.h>
 
-int wifi_reconnect_count = 0;
+#include "blflow/app.h"
+#include "blflow/config.h"
+#include "blflow/fan_control.h"
+#include "blflow/ha_mqtt.h"
+#include "blflow/indicator.h"
+#include "blflow/log.h"
+#include "blflow/printer_link.h"
+#include "blflow/serial_provision.h"
+#include "blflow/ssdp.h"
+#include "blflow/state.h"
+#include "blflow/version.h"
+#include "blflow/web_server.h"
+#include "blflow/wifi_manager.h"
 
-void setup(){
-    Serial.begin(115200);
-    delay(100);
-    Serial.println(F("Initializing"));
-    Serial.println(ESP.getFreeHeap());
-    Serial.println("");
-    Serial.print(F("** Using firmware version: "));
-    Serial.print(globalVariables.FWVersion);
-    Serial.println(F(" **"));
-    Serial.println("");
-    
-    fansetup();
-    indicatorsetup();
-    delay(1000);
-    setupFileSystem();
-    loadFileSystem();
-    Serial.println(F(""));
-    delay(500);
+using namespace blsf;
 
-    setupSerial();
+namespace {
 
-    if (strlen(globalVariables.SSID) == 0 || strlen(globalVariables.APPW) == 0) {
-        printerVariables.errorcode = "no config";
-        Serial.println(F("SSID or password is missing. Please configure both by going to: https://dutchdevelop.com/smartflow-configuration-setup/"));
-        return;
-    }
-    else if (printerVariables.errorcode == "no config"){
-        //if this routine set the error code, clear it
-        printerVariables.errorcode = "";
-    }
-    
-   
-    scanNetwork(); //Sets the MAC address for following connection attempt
-    if(!connectToWifi()){
-        printerVariables.errorcode = "no wifi";
-        return;
-    }
-    else if (printerVariables.errorcode == "no wifi"){
-        //if this routine set the error code, clear it
-        printerVariables.errorcode = "";
-    }
-    
-    setupWebserver();
-    delay(500);
-    start_ssdp();
-    setupMqtt();
+// Deferred actions requested from async handlers / other tasks.
+// A separate flag rather than "g_restartAtMs != 0" as the sentinel: millis()
+// really can be 0 at the moment a request is made, and a restart scheduled then
+// would simply never fire.
+volatile bool     g_restartPending = false;
+volatile uint32_t g_restartAtMs = 0;
+volatile bool     g_factoryReset = false;
 
-    Serial.println();
-    Serial.print(F("** BLLED Controller started "));
-    Serial.print(F("using firmware version: "));
-    Serial.print(globalVariables.FWVersion);
-    Serial.println(F(" **"));
-    Serial.println();
-    globalVariables.started = true;
+bool g_wifiWasConnected = false;
+bool g_servicesStarted = false;
+
+}  // namespace
+
+namespace blsf {
+
+void appRequestRestart(uint32_t delayMs)
+{
+    const uint32_t at = millis() + delayMs;
+    // Keep the earliest pending deadline so a later, longer request cannot
+    // postpone a restart that is already imminent.
+    if (!g_restartPending || (int32_t)(at - g_restartAtMs) < 0) g_restartAtMs = at;
+    g_restartPending = true;
 }
 
-void loop(){
-    fanloop(); //Run fanloop at the start of the loop so its always updating before everything else.
-    indicatorloop();
-    serialLoop();
+void appRequestFactoryReset()
+{
+    g_factoryReset = true;
+    appRequestRestart(750);
+}
 
-    if (globalVariables.started){
-        mqttloop();
-        webserverloop();
-        
-        if (WiFi.status() != WL_CONNECTED){
-            Serial.print(F("Wifi connection dropped.  "));
-            Serial.print(F("Wifi Status: ")); 
-            Serial.println(wl_status_to_string(WiFi.status()));
-            Serial.println(F("Attempting to reconnect to WiFi..."));
-            wifi_reconnect_count += 1;
-            if(wifi_reconnect_count <= 2){
-                WiFi.disconnect();
-                delay(100);
-                WiFi.reconnect();
-            } else {
-                //Not connecting after 10 simple disconnect / reconnects
-                //Do something more drastic in case needing to switch to new AP
-                scanNetwork();
-                connectToWifi();
-                wifi_reconnect_count = 0;
-            }
+void appApplyConfig(bool printerChanged, bool mqttChanged, bool fanChanged, bool ssdpChanged)
+{
+    logSetSerialEnabled(cfg().debug.serial);
+    if (fanChanged) fanControlReconfigure();
+    // The printer task also needs to see debug.mqttDump and fan.staleSec, both of
+    // which it snapshots in reconfigure().
+    printerLinkReconfigure();
+    (void)printerChanged;
+    if (mqttChanged) haMqttReconfigure();
+    if (ssdpChanged) ssdpReconfigure();
+}
+
+}  // namespace blsf
+
+void setup()
+{
+    Serial.begin(115200);
+    logInit();
+
+    stateInit();
+    configLoad();
+    logSetSerialEnabled(cfg().debug.serial);
+
+    LOGI("%s %s (built %s)", FW_NAME, FW_VERSION, FW_BUILD);
+    LOGI("chip %s, heap %u bytes", chipId(), (unsigned)ESP.getFreeHeap());
+
+    indicatorSetup();
+    fanControlSetup();
+    serialProvisionSetup();
+
+    // Fan control must be live before the network comes up: a printer that is
+    // already hot should not wait for DHCP.
+    fanControlLoop();
+
+    wifiSetup();
+    webServerSetup();
+    printerLinkStart();
+    haMqttSetup();
+}
+
+void loop()
+{
+    // Order matters only in that fan control runs first, so its timing is never
+    // pushed around by slower housekeeping.
+    fanControlLoop();
+    indicatorLoop();
+    wifiLoop();
+    serialProvisionLoop();
+    webServerLoop();
+    haMqttLoop();
+    ssdpLoop();
+    // Persists a config that a fan/mode command marked dirty, at most every 10 s.
+    configLoopSave();
+
+    // Services that need an IP are started once the station first comes up.
+    const bool up = wifiConnected();
+    if (up && !g_wifiWasConnected) {
+        if (!g_servicesStarted) {
+            ssdpStart();
+            g_servicesStarted = true;
         }
+        haMqttReconfigure();     // rebuild the configuration_url with the new IP
     }
-    if(printerConfig.rescanWiFiNetwork)
-    {
-        Serial.println(F("Web submitted refresh of Wifi Scan (assigning Strongest AP)"));
-        scanNetwork(); //Sets the MAC address for following connection attempt
-        printerConfig.rescanWiFiNetwork = false;
+    g_wifiWasConnected = up;
+
+    if (g_restartPending && (int32_t)(millis() - g_restartAtMs) >= 0) {
+        if (g_factoryReset) {
+            configWipe();
+            LittleFS.end();
+        }
+        LOGW("restarting");
+        Serial.flush();
+        ESP.restart();
     }
+
+    // One tick of yield: keeps the idle task fed (watchdog) without adding
+    // meaningful latency to anything above.
+    delay(1);
 }

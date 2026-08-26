@@ -1,0 +1,178 @@
+{
+ "print": {
+  "3D": {
+   "layer_num": 0,
+   "total_layer_num": 90
+  },
+  "ams_rfid_status": 3,
+  "ams_status": 768,
+  "ap_err": 0,
+  "aux": "280100C",
+  "aux_part_fan": true,
+  "batch_id": 0,
+  "bed_target_temper": 120.0,
+  "bed_temper": 120.0,
+  "big_fan1_speed": "6",
+  "big_fan2_speed": "0",
+  "cali_version": 0,
+  "canvas_id": 0,
+  "command": "push_status",
+  "cooling_fan_speed": "0",
+  "design_id": "",
+  "device": {
+   "bed": {
+    "info": {
+     "temp": 7864440
+    },
+    "state": 2
+   },
+   "bed_temp": 7864440,
+   "cam": {
+    "laser": {
+     "cond": 252,
+     "state": 0
+    }
+   },
+   "ctc": {
+    "info": {
+     "temp": 43
+    },
+    "state": 0
+   },
+   "ext_tool": {
+    "calib": 2,
+    "low_prec": true,
+    "mount": 0,
+    "th_temp": 0,
+    "type": ""
+   },
+   "extruder": {
+    "info": [
+     {
+      "filam_bak": [],
+      "hnow": 0,
+      "hpre": 0,
+      "htar": 0,
+      "id": 0,
+      "info": 74,
+      "snow": 0,
+      "spre": 0,
+      "star": 0,
+      "stat": 197376,
+      "temp": 9175180
+     }
+    ],
+    "state": 1
+   },
+   "fan": 356391,
+   "laser": {
+    "power": 0
+   },
+   "nozzle": {
+    "exist": 1,
+    "info": [
+     {
+      "diameter": 0.4,
+      "id": 0,
+      "tm": 0,
+      "type": "HX01",
+      "wear": 0
+     }
+    ],
+    "state": 0
+   },
+   "plate": {
+    "base": 1,
+    "cali2d_id": "",
+    "cur_id": "",
+    "mat": 1,
+    "tar_id": ""
+   },
+   "type": 1
+  },
+  "err": "0",
+  "fail_reason": "0",
+  "fan_gear": 25600,
+  "force_upgrade": false,
+  "fun": "20011A30F9CFB",
+  "fun2": "1000",
+  "gcode_file": "/data/Metadata/plate_1.gcode",
+  "gcode_file_prepare_percent": "100",
+  "gcode_state": "RUNNING",
+  "heatbreak_fan_speed": "13",
+  "hms": [],
+  "home_flag": -1058683593,
+  "hw_switch_state": 1,
+  "info": {
+   "temp": 43
+  },
+  "job_id": "",
+  "layer_num": 0,
+  "lights_report": [
+   {
+    "mode": "on",
+    "node": "chamber_light"
+   },
+   {
+    "mode": "flashing",
+    "node": "work_light"
+   }
+  ],
+  "mc_action": 257,
+  "mc_err": 0,
+  "mc_percent": 4,
+  "mc_print_error_code": "0",
+  "mc_print_stage": "2",
+  "mc_print_sub_stage": 1,
+  "mc_remaining_time": 117,
+  "mc_stage": 258,
+  "model_id": "",
+  "nozzle_diameter": "0.4",
+  "nozzle_target_temper": 140.0,
+  "nozzle_temper": 140.0,
+  "nozzle_type": "HX01",
+  "online": {
+   "ahb": false,
+   "ext": false,
+   "version": 4
+  },
+  "percent": 4,
+  "plate_cnt": 2,
+  "plate_id": 0,
+  "plate_idx": 0,
+  "prepare_per": 100,
+  "print_error": 0,
+  "print_gcode_action": 1,
+  "print_real_action": 1,
+  "print_type": "cloud",
+  "printer": {
+   "print_time": 1893
+  },
+  "profile_id": "",
+  "project_id": "",
+  "queue_est": 0,
+  "queue_number": 0,
+  "queue_sts": 0,
+  "queue_total": 0,
+  "remain_time": 117,
+  "sequence_id": "2021",
+  "spd_lvl": 2,
+  "spd_mag": 100,
+  "stat": "7A080F0",
+  "state": 4,
+  "stg": [
+   54,
+   14,
+   1,
+   8
+  ],
+  "stg_cur": 1,
+  "subtask_id": "",
+  "subtask_name": "Example print.3mf",
+  "task_id": "",
+  "total_layer_num": 90,
+  "ver": "20000",
+  "wifi_signal": "-32dBm",
+  "xcam_status": "0"
+ }
+}

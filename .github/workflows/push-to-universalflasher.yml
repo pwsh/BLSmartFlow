@@ -13,10 +13,10 @@ jobs:
 
     steps:
       - name: Checkout this firmware repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Download .bin from current release
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         env:
           TARGET_DIR: ${{ env.TARGET_DIR }}
         with:

@@ -1,54 +1,29 @@
-#ifndef _INDICATOR
-#define _INDICATOR
+// indicator.h - status LED on GPIO 21.
+//
+// Purely millis()-driven: the old implementation blocked the whole loop with
+// delay() while blinking, which froze fan control and the web UI. Here the
+// pattern is a small state machine evaluated once per loop pass.
+//
+// Priority (highest first):
+//   1 blink   unprovisioned / running the setup access point
+//   2 blinks  WiFi down
+//   3 blinks  printer MQTT down
+//   4 blinks  printer data stale
+//   double-flash every 3 s   manual fan override active
+//   solid     everything nominal
 
-#include "types.h"
+#ifndef BLSF_INDICATOR_H
+#define BLSF_INDICATOR_H
+
 #include <Arduino.h>
 
-unsigned long previousMillis = 0;
-const int baseInterval = 200;
-const int LED_PIN = 21;
+namespace blsf {
 
-struct ErrorPattern {
-    String error;
-    int blinkCount;
-};
+static const uint8_t PIN_LED = 21;
 
-ErrorPattern errors[] = {
-    {"no config", 1},
-    {"no wifi", 2},
-    {"no mqtt", 3},
-};
+void indicatorSetup();
+void indicatorLoop();
 
-void indicatorloop() {
-    if (printerVariables.errorcode != ""){
-        int blinkTimes = 0;
-        for (auto &err : errors) {
-            if (err.error == printerVariables.errorcode) {
-                blinkTimes = err.blinkCount;
-                break;
-            }
-        }
+}  // namespace blsf
 
-        if (blinkTimes == 0) {
-            digitalWrite(LED_PIN, HIGH);
-            return;
-        }
-
-        for (int i = 0; i < blinkTimes; i++) {
-            digitalWrite(LED_PIN, HIGH);
-            delay(baseInterval);
-            digitalWrite(LED_PIN, LOW);
-            delay(baseInterval);
-        }
-
-        delay(baseInterval * 4);
-    }else{
-        digitalWrite(LED_PIN, HIGH);
-    }
-}
-
-void indicatorsetup(){
-    pinMode(LED_PIN, OUTPUT);
-}
-
-#endif
+#endif  // BLSF_INDICATOR_H

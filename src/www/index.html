@@ -1,0 +1,1443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>BLSmartFlow</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%230b6bcb'/%3E%3Cg fill='%23fff'%3E%3Cpath d='M16 15a5 5 0 0 1-5-5c0-3 2-5 5-5s3 6 0 10z'/%3E%3Cpath d='M17 17a5 5 0 0 1 5 5c0 3-2 5-5 5s-3-6 0-10z'/%3E%3Cpath d='M15 17a5 5 0 0 1-5 5c-3 0-5-2-5-5s6-3 10 0z' transform='rotate(90 16 16)'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#eef1f5; --card:#fff; --card2:#f6f8fa; --fg:#16202a; --muted:#5a6b7b; --line:#d9e0e8;
+  --accent:#0b63c5; --accent-fg:#fff; --ok:#0f8a4a; --warn:#b26a00; --err:#c02626; --info:#0b63c5;
+  --shadow:0 1px 2px rgba(16,32,48,.08),0 4px 16px rgba(16,32,48,.06);
+  --r:12px; --tap:44px;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#0e141a; --card:#161f28; --card2:#1c2731; --fg:#e6edf3; --muted:#9db0c2; --line:#2a3744;
+  --accent:#4c9bff; --accent-fg:#08121d; --ok:#3fc07a; --warn:#e0a33a; --err:#ff6b6b; --info:#4c9bff;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.3);
+}}
+:root[data-theme=dark]{
+  --bg:#0e141a; --card:#161f28; --card2:#1c2731; --fg:#e6edf3; --muted:#9db0c2; --line:#2a3744;
+  --accent:#4c9bff; --accent-fg:#08121d; --ok:#3fc07a; --warn:#e0a33a; --err:#ff6b6b; --info:#4c9bff;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.3);
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-text-size-adjust:100%;overflow-x:hidden}
+h1,h2,h3{margin:0;font-weight:600;line-height:1.25}
+a{color:var(--accent)}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px;border-radius:6px}
+.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+/* ---------- shell ---------- */
+#app{min-height:100vh;display:grid;grid-template-columns:1fr;grid-template-rows:auto 1fr}
+#side{display:none}
+#top{grid-column:1/-1;position:sticky;top:0;z-index:30;display:flex;gap:10px;align-items:center;
+  padding:10px 14px;background:var(--card);border-bottom:1px solid var(--line)}
+#top .brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:.2px}
+#top .brand svg{width:26px;height:26px;flex:none}
+#top .grow{flex:1}
+#topbadges{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+main{padding:14px 14px calc(72px + env(safe-area-inset-bottom));max-width:1400px;width:100%;margin:0 auto}
+section[hidden]{display:none}
+.page-h{margin:2px 0 14px}
+.page-h h2{font-size:20px}
+.page-h p{margin:4px 0 0;color:var(--muted);font-size:13.5px;max-width:70ch}
+
+/* bottom tab bar (<900px) */
+#tabs{position:fixed;left:0;right:0;bottom:0;z-index:31;display:flex;background:var(--card);
+  border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+#tabs button{flex:1;min-height:var(--tap);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  background:none;border:0;color:var(--muted);font:500 10.5px/1.1 inherit;padding:6px 2px;cursor:pointer}
+#tabs button svg{width:21px;height:21px}
+#tabs button[aria-current=page]{color:var(--accent)}
+
+@media (min-width:900px){
+  #app{grid-template-columns:222px 1fr}
+  #side{display:flex;flex-direction:column;gap:4px;padding:14px 10px;background:var(--card);
+    border-right:1px solid var(--line);position:sticky;top:57px;height:calc(100vh - 57px);align-self:start}
+  #side button{display:flex;align-items:center;gap:10px;min-height:var(--tap);padding:0 12px;border:0;border-radius:10px;
+    background:none;color:var(--fg);font:500 14.5px/1 inherit;cursor:pointer;text-align:left;width:100%}
+  #side button svg{width:19px;height:19px;flex:none;color:var(--muted)}
+  #side button:hover{background:var(--card2)}
+  #side button[aria-current=page]{background:var(--accent);color:var(--accent-fg)}
+  #side button[aria-current=page] svg{color:currentColor}
+  #tabs{display:none}
+  main{padding:20px 22px 90px}
+}
+
+/* ---------- cards ---------- */
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));align-items:start}
+.grid.wide{grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:14px;min-width:0}
+.card.span2{grid-column:1/-1}
+.card>header{display:flex;align-items:center;gap:8px;margin:-2px 0 10px}
+.card>header h3{font-size:15px}
+.card>header .grow{flex:1}
+.hint{color:var(--muted);font-size:12.5px;margin:0 0 10px}
+
+/* ---------- forms ---------- */
+.field{margin:0 0 12px;min-width:0}
+.field:last-child{margin-bottom:0}
+.field>label,.lbl{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;margin:0 0 5px;color:var(--fg)}
+.field .unit{color:var(--muted);font-weight:500}
+input[type=text],input[type=password],input[type=number],input[type=file],select,textarea{
+  width:100%;min-height:var(--tap);padding:8px 10px;border:1px solid var(--line);border-radius:9px;
+  background:var(--card2);color:var(--fg);font:inherit;font-size:14.5px}
+input[type=number]{-moz-appearance:textfield}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:32px}
+input:disabled,select:disabled,button:disabled{opacity:.55;cursor:not-allowed}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row>.field{flex:1 1 130px;margin-bottom:0}
+.btn{min-height:var(--tap);padding:0 14px;border-radius:10px;border:1px solid var(--line);background:var(--card2);color:var(--fg);
+  font:600 14px/1 inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.btn:hover{border-color:var(--accent)}
+.btn svg{width:17px;height:17px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.btn.danger{background:var(--err);border-color:var(--err);color:#fff}
+.btn.ghost{background:none}
+.btn.sm{min-height:34px;padding:0 10px;font-size:13px;border-radius:8px}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+
+/* toggle switch */
+.sw{display:flex;align-items:center;gap:10px;min-height:var(--tap);cursor:pointer}
+button[role=switch]{position:relative;flex:none;width:46px;height:27px;border-radius:14px;border:1px solid var(--line);
+  background:var(--card2);cursor:pointer;padding:0}
+button[role=switch]::after{content:"";position:absolute;top:2px;left:2px;width:21px;height:21px;border-radius:50%;
+  background:var(--muted);transition:transform .16s,background .16s}
+button[role=switch][aria-checked=true]{background:var(--accent);border-color:var(--accent)}
+button[role=switch][aria-checked=true]::after{transform:translateX(19px);background:#fff}
+.sw .txt{font-size:13.5px;font-weight:600}
+.sw .txt small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+
+/* "?" tooltip trigger */
+.qm{flex:none;width:18px;height:18px;border-radius:50%;border:1px solid var(--line);background:var(--card2);color:var(--muted);
+  font:700 11px/1 inherit;cursor:pointer;padding:0;display:inline-flex;align-items:center;justify-content:center;position:relative}
+.qm::before{content:"";position:absolute;inset:-13px}
+.qm:hover,.qm[aria-expanded=true]{border-color:var(--accent);color:var(--accent)}
+
+/* ---------- badges / chips ---------- */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;background:var(--card2);
+  border:1px solid var(--line);font-size:12px;font-weight:600;color:var(--fg);white-space:nowrap}
+.badge svg{width:14px;height:14px}
+.badge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.badge.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.badge.err{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,var(--line))}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.badge.ok .dot{background:var(--ok)}.badge.warn .dot{background:var(--warn)}.badge.err .dot{background:var(--err)}
+.bars{display:inline-flex;align-items:flex-end;gap:1.5px;height:13px}
+.bars i{width:3px;background:currentColor;opacity:.25;border-radius:1px}
+.bars i.on{opacity:1}
+.bars i:nth-child(1){height:4px}.bars i:nth-child(2){height:7px}.bars i:nth-child(3){height:10px}.bars i:nth-child(4){height:13px}
+
+/* ---------- dashboard ---------- */
+.gauge{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.gauge .fan{width:118px;height:118px;flex:none}
+.fan .blades{transform-origin:50% 50%;animation:spin 1s linear infinite;animation-play-state:paused}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.fan .blades{animation:none}}
+.big{font:700 42px/1 system-ui,sans-serif;font-variant-numeric:tabular-nums}
+.big small{font-size:18px;color:var(--muted);font-weight:600}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:13.5px;margin:0}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
+.stat{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:9px 11px}
+.stat .l{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+.stat .v{font:700 21px/1.2 system-ui,sans-serif;font-variant-numeric:tabular-nums;margin-top:3px}
+.stat .v small{font-size:12.5px;color:var(--muted);font-weight:600}
+.stats{display:grid;gap:9px;grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+.bar{height:9px;border-radius:5px;background:var(--card2);border:1px solid var(--line);overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);width:0;transition:width .4s}
+.mode-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+.mode-chip{padding:5px 11px;border-radius:999px;font-size:12.5px;font-weight:700;background:var(--card2);border:1px solid var(--line)}
+.mode-expl{color:var(--muted);font-size:12.5px;margin:6px 0 0}
+input[type=range]{width:100%;height:var(--tap);accent-color:var(--accent);background:none;border:0;padding:0}
+
+/* ---------- curve editor ---------- */
+.canvaswrap{position:relative;width:100%;background:var(--card2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+#curveCanvas{display:block;width:100%;height:auto;touch-action:none;cursor:crosshair}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{min-height:36px;padding:0 11px;border:0;background:var(--card2);color:var(--fg);font:600 13px/1 inherit;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-fg)}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
+tr.sel td{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+td input[type=number]{min-height:36px;padding:4px 6px;font-size:13.5px;max-width:130px}
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+kbd{background:var(--card2);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+code.blk{display:block;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;
+  overflow-x:auto;white-space:pre}
+
+/* unsaved bar */
+#savebar{position:fixed;left:0;right:0;bottom:0;z-index:40;display:none;gap:10px;align-items:center;
+  padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--card);border-top:2px solid var(--accent);
+  box-shadow:0 -6px 20px rgba(0,0,0,.14)}
+#savebar.on{display:flex}
+#savebar .t{flex:1;font-size:13.5px;font-weight:600;min-width:0}
+@media (max-width:899px){#savebar.on{bottom:calc(56px + env(safe-area-inset-bottom));padding-bottom:10px}}
+
+/* ---------- log ---------- */
+#logbox{height:260px;overflow:auto;background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:8px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+#logbox .w{color:var(--warn)}#logbox .e{color:var(--err)}
+
+/* ---------- networks ---------- */
+.netlist{list-style:none;margin:10px 0 0;padding:0;max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:9px}
+.netlist li+li{border-top:1px solid var(--line)}
+.netlist button{width:100%;min-height:var(--tap);display:flex;align-items:center;gap:10px;padding:8px 11px;background:none;
+  border:0;color:var(--fg);font:inherit;text-align:left;cursor:pointer}
+.netlist button:hover{background:var(--card2)}
+.netlist .ss{flex:1;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.netlist .meta{color:var(--muted);font-size:12px;white-space:nowrap}
+
+/* ---------- banners / toasts / tooltip ---------- */
+.banner{display:flex;gap:10px;align-items:flex-start;padding:11px 13px;border-radius:10px;margin:0 0 14px;
+  background:color-mix(in srgb,var(--info) 12%,var(--card));border:1px solid color-mix(in srgb,var(--info) 40%,var(--line));font-size:13.5px}
+.banner.warn{background:color-mix(in srgb,var(--warn) 13%,var(--card));border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.banner.err{background:color-mix(in srgb,var(--err) 12%,var(--card));border-color:color-mix(in srgb,var(--err) 45%,var(--line))}
+.banner svg{width:19px;height:19px;flex:none;margin-top:1px}
+.banner b{display:block}
+#toasts{position:fixed;z-index:60;left:50%;transform:translateX(-50%);bottom:calc(74px + env(safe-area-inset-bottom));
+  display:flex;flex-direction:column;gap:8px;width:min(420px,calc(100vw - 24px));pointer-events:none}
+@media (min-width:900px){#toasts{left:auto;right:20px;transform:none;bottom:20px}}
+.toast{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;
+  box-shadow:var(--shadow);padding:10px 12px;font-size:13.5px;overflow-wrap:anywhere;animation:pop .18s ease-out}
+.toast.ok{border-left-color:var(--ok)}.toast.err{border-left-color:var(--err)}.toast.warn{border-left-color:var(--warn)}
+@keyframes pop{from{opacity:0;transform:translateY(8px)}}
+#tip{position:fixed;z-index:70;max-width:min(300px,calc(100vw - 20px));background:var(--fg);color:var(--bg);
+  padding:8px 10px;border-radius:9px;font-size:12.5px;line-height:1.45;box-shadow:var(--shadow);pointer-events:none;display:none}
+#tip.on{display:block}
+.prog{height:10px;border-radius:5px;background:var(--card2);border:1px solid var(--line);overflow:hidden;margin-top:10px}
+.prog>i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+.nowrap{white-space:nowrap}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<g id="i-dash" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 15a8 8 0 1 1 16 0"/><path d="M12 15l4-4"/></g>
+<g id="i-curve" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M4 17c4 0 5-9 9-9s4 5 7 5"/></g>
+<g id="i-printer" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="4" y="8" width="16" height="9" rx="2"/><path d="M8 8V4h8v4M8 17v3h8v-3"/></g>
+<g id="i-wifi" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2.5 9a15 15 0 0 1 19 0"/><path d="M6 12.5a10 10 0 0 1 12 0"/><path d="M9.5 16a5 5 0 0 1 5 0"/><circle cx="12" cy="19.5" r="1.2" fill="currentColor"/></g>
+<g id="i-plug" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 3v6M15 3v6"/><path d="M6 9h12v3a6 6 0 0 1-12 0z"/><path d="M12 18v3"/></g>
+<g id="i-gear" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"/></g>
+<g id="i-sun" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></g>
+<g id="i-moon" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></g>
+<g id="i-auto" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/></g>
+<g id="i-info" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></g>
+<g id="i-alert" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 21 19H3z"/><path d="M12 10v4M12 17h.01"/></g>
+<g id="i-copy" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4V4h11v1"/></g>
+<g id="i-plus" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></g>
+<g id="i-trash" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></g>
+<g id="i-save" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></g>
+<g id="i-undo" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h9a5 5 0 0 1 0 10H8"/><path d="M4 9l4-4M4 9l4 4"/></g>
+<g id="i-refresh" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></g>
+<g id="i-power" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v9"/><path d="M6.5 6.8a8 8 0 1 0 11 0"/></g>
+<g id="i-dl" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></g>
+<g id="i-up" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V8"/><path d="M7 12l5-5 5 5"/><path d="M4 4h16"/></g>
+<g id="i-lock" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></g>
+<g id="i-eye" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></g>
+</defs></svg>
+
+<div id="app">
+<header id="top">
+  <span class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="15" fill="var(--accent)"/><g fill="var(--accent-fg)"><path d="M16 15a5 5 0 0 1-5-5c0-3 2-5 5-5s3 6 0 10z"/><path d="M16 17a5 5 0 0 1 5 5c0 3-2 5-5 5s-3-6 0-10z"/><path d="M15 15a5 5 0 0 1-5 5c-3 0-5-2-5-5s6-3 10 0z"/><path d="M17 17a5 5 0 0 1 5-5c3 0 5 2 5 5s-6 3-10 0z"/></g></svg>BLSmartFlow</span>
+  <span class="grow"></span>
+  <div id="topbadges"></div>
+  <button class="btn sm ghost" id="themeBtn" data-tip="Switch the colour theme: follow the system setting, or force light or dark. Your choice is stored in this browser only, not on the device." aria-label="Theme: system"><svg aria-hidden="true"><use href="#i-auto"/></svg></button>
+</header>
+
+<nav id="side" aria-label="Sections"></nav>
+
+<main>
+<div id="connbanner"></div>
+
+<!-- ==================== DASHBOARD ==================== -->
+<section id="p-dashboard" aria-labelledby="h-dashboard">
+  <div class="page-h"><h2 id="h-dashboard">Dashboard</h2><p>Live fan output, printer temperatures and connection state. Updates once per second over a server-sent event stream.</p></div>
+  <div class="grid wide">
+
+    <div class="card">
+      <header><h3>Fan output</h3><span class="grow"></span><span class="badge" id="dutyBadge" data-tip="The 8-bit value actually written to the fan pin (0-255). When 'Invert PWM' is on it is already inverted here, so an output of 0 % is reported as duty 255.">duty -</span></header>
+      <div class="gauge">
+        <svg class="fan" viewBox="0 0 100 100" aria-hidden="true">
+          <circle cx="50" cy="50" r="46" fill="none" stroke="var(--line)" stroke-width="6"/>
+          <circle id="gaugeArc" cx="50" cy="50" r="46" fill="none" stroke="var(--accent)" stroke-width="6" stroke-linecap="round"
+                  stroke-dasharray="289" stroke-dashoffset="289" transform="rotate(-90 50 50)"/>
+          <g class="blades" fill="var(--accent)" opacity=".9">
+            <path d="M50 48c-7 0-13-6-13-13S43 24 50 24s7 8 4 15z"/><path d="M52 50c0 7 6 13 13 13s11-6 11-13-8-7-15-4z"/>
+            <path d="M50 52c7 0 13 6 13 13s-6 11-13 11-7-8-4-15z"/><path d="M48 50c0-7-6-13-13-13s-11 6-11 13 8 7 15 4z"/>
+          </g>
+          <circle cx="50" cy="50" r="6" fill="var(--muted)"/>
+        </svg>
+        <div style="min-width:0">
+          <div class="big"><span id="fanOut">--</span><small>%</small></div>
+          <div class="mode-line"><span class="mode-chip" id="modeChip">-</span><span class="badge" id="targetBadge" data-tip="Target speed the controller is aiming at right now. The output moves towards it at the configured ramp rate; minimum speed and kick-start can make the actual output differ for a moment.">target -</span></div>
+          <p class="mode-expl" id="modeExpl">Waiting for the first status update...</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <header><h3>Manual override</h3><span class="grow"></span><button class="qm" type="button" data-tip="Temporarily take control of the fan. 'Apply' sets the fan to manual mode at the chosen speed; with a duration the device returns to the curve automatically when it expires. Off keeps both outputs at 0 % until you change it back.">?</button></header>
+      <div class="field">
+        <label for="ovSpeed">Speed <span class="unit" id="ovSpeedVal">50 %</span></label>
+        <input type="range" id="ovSpeed" min="0" max="100" step="1" value="50" data-tip="Fan speed in percent (0-100). This is applied to both enabled outputs. Values below the configured minimum speed are clamped to 0 %.">
+      </div>
+      <div class="field">
+        <label for="ovDur">Duration <button class="qm" type="button" data-tip="How long the manual speed stays active. 'Until changed' persists across reboots; the timed options send durationSec and the device falls back to the curve when the timer expires.">?</button></label>
+        <select id="ovDur" data-tip="How long the manual speed stays active before the device returns to automatic curve control.">
+          <option value="0">Until changed (persisted)</option><option value="600">10 minutes</option>
+          <option value="1800">30 minutes</option><option value="3600">1 hour</option><option value="14400">4 hours</option>
+        </select>
+      </div>
+      <p class="hint" id="ovExpiry" hidden></p>
+      <div class="btns">
+        <button class="btn primary" id="ovApply" data-tip="Send POST /api/fan with mode=manual and the chosen speed and duration.">Apply manual</button>
+        <button class="btn" id="ovAuto" data-tip="Return to automatic mode: the fan follows the temperature curve again (POST /api/fan mode=auto).">Back to auto</button>
+        <button class="btn" id="ovOff" data-tip="Force both fan outputs to 0 % and keep them there until you switch back to auto or manual.">Fan off</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <header><h3>Temperatures</h3><span class="grow"></span><span class="badge" id="srcBadge" data-tip="The temperature the fan curve reads. Change it on the Fan Curve page (nozzle, bed, chamber, or the hottest of the three).">source</span></header>
+      <div class="stats">
+        <div class="stat" data-tip="Temperature currently fed into the curve, after the hysteresis filter has been applied by the device."><div class="l">Source</div><div class="v"><span id="tSrc">--</span><small> &deg;C</small></div></div>
+        <div class="stat" data-tip="Hotend temperature and its target, as reported by the printer over MQTT."><div class="l">Nozzle</div><div class="v"><span id="tNoz">--</span><small> &deg;C</small><small id="tNozT"></small></div></div>
+        <div class="stat" data-tip="Heatbed temperature and its target."><div class="l">Bed</div><div class="v"><span id="tBed">--</span><small> &deg;C</small><small id="tBedT"></small></div></div>
+        <div class="stat" data-tip="Chamber temperature. Only X1/H2D style printers report this; on other models it stays empty."><div class="l">Chamber</div><div class="v"><span id="tCha">--</span><small> &deg;C</small></div></div>
+      </div>
+      <p class="hint" style="margin:10px 0 0">Printer fans: part <b id="fPart">-</b>, aux <b id="fAux">-</b>, chamber <b id="fCha">-</b>, heatbreak <b id="fHb">-</b></p>
+    </div>
+
+    <div class="card">
+      <header><h3>Print job</h3><span class="grow"></span><span class="badge" id="stateBadge">-</span></header>
+      <div class="row" style="justify-content:space-between"><b id="jobName" style="overflow-wrap:anywhere">No active job</b><span class="mono" id="jobPct">0 %</span></div>
+      <div class="bar" style="margin:8px 0 10px"><i id="jobBar"></i></div>
+      <dl class="kv">
+        <dt>Stage</dt><dd id="jobStage">-</dd>
+        <dt>Remaining</dt><dd id="jobRem">-</dd>
+        <dt>Layer</dt><dd id="jobLayer">-</dd>
+        <dt>Door</dt><dd id="jobDoor">-</dd>
+        <dt>Printer WiFi</dt><dd id="jobPwifi">-</dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <header><h3>Connections</h3><span class="grow"></span><button class="qm" type="button" data-tip="Link status for the three connections the device maintains: its own WiFi client, the MQTT session to the printer, and the optional external MQTT broker.">?</button></header>
+      <div class="row" id="connBadges" style="margin-bottom:10px"></div>
+      <dl class="kv">
+        <dt>Device IP</dt><dd id="cIp">-</dd>
+        <dt>Hostname</dt><dd id="cHost">-</dd>
+        <dt>Printer data age</dt><dd id="cAge">-</dd>
+        <dt>Uptime</dt><dd id="cUp">-</dd>
+        <dt>Free heap</dt><dd id="cHeap">-</dd>
+        <dt>Firmware</dt><dd id="cFw">-</dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== FAN CURVE ==================== -->
+<section id="p-curve" hidden aria-labelledby="h-curve">
+  <div class="page-h"><h2 id="h-curve">Fan curve</h2><p>Map the source temperature to a fan speed. Drag the points, edit the table, or start from a preset - then save to the device.</p></div>
+  <div class="grid wide">
+
+    <div class="card span2">
+      <header><h3>Curve</h3><span class="grow"></span>
+        <div class="seg" role="group" aria-label="Temperature axis range">
+          <button type="button" id="rng100" aria-pressed="false" data-tip="Zoom the temperature axis to 0-100 &deg;C. Use this for chamber-temperature curves, where all the interesting values sit below 60 &deg;C.">0-100 &deg;C</button>
+          <button type="button" id="rng400" aria-pressed="true" data-tip="Full 0-400 &deg;C axis for nozzle curves. The axis always stretches far enough to show your highest point.">0-400 &deg;C</button>
+        </div>
+      </header>
+      <div class="canvaswrap">
+        <canvas id="curveCanvas" role="img" aria-label="Fan curve editor. Use the table below to edit points with the keyboard."></canvas>
+      </div>
+      <div class="btns">
+        <button class="btn sm" id="cvAdd" data-tip="Insert a new point in the middle of the widest gap. You can also click or tap directly on the curve line to add a point there. Maximum 16 points."><svg aria-hidden="true"><use href="#i-plus"/></svg>Add point</button>
+        <button class="btn sm" id="cvDel" data-tip="Delete the selected point (or press Delete / Backspace). The curve always keeps at least 2 points."><svg aria-hidden="true"><use href="#i-trash"/></svg>Delete point</button>
+        <span class="grow" style="flex:1"></span>
+        <label class="lbl" for="cvPreset" style="margin:0">Preset</label>
+        <select id="cvPreset" style="width:auto;min-width:170px" data-tip="Replace the curve with a ready-made shape. Quiet keeps the fan low for as long as possible, Balanced is a good default for PLA/PETG, Aggressive maximises cooling, and Chamber-ABS is a 0-80 &deg;C curve for chamber-temperature control. Nothing is written to the device until you save.">
+          <option value="">Choose...</option><option value="quiet">Quiet</option><option value="balanced">Balanced</option>
+          <option value="aggressive">Aggressive</option><option value="chamber">Chamber-ABS</option>
+        </select>
+      </div>
+      <p class="hint" style="margin-top:10px">Drag a point to move it, click the line to insert one, <kbd>Delete</kbd> removes the selected point. Values snap to 1 &deg;C / 1 %. The dashed marker shows the live source temperature and the resulting output.</p>
+      <div class="tablewrap"><table>
+        <thead><tr><th style="width:44px">#</th><th>Temperature <span class="unit">&deg;C</span></th><th>Speed <span class="unit">%</span></th><th style="width:52px"><span class="sr">Remove</span></th></tr></thead>
+        <tbody id="cvRows"></tbody>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Control behaviour</h3><span class="grow"></span><button class="qm" type="button" data-tip="How the controller turns the curve result into an actual PWM output: which temperature it reads, how strongly it filters it, and how fast the output is allowed to change.">?</button></header>
+      <div class="field"><label for="f-source">Temperature source <button class="qm" type="button" data-tip="Which printer temperature drives the curve. 'Nozzle' suits part-cooling style setups, 'Chamber' suits enclosure venting, and 'Hottest of all' takes the maximum of nozzle, bed and chamber so the fan reacts to whichever is highest.">?</button></label>
+        <select id="f-source" data-path="fan.source" data-tip="Which printer temperature the curve reads: nozzle, bed, chamber, or the hottest of the three.">
+          <option value="nozzle">Nozzle</option><option value="bed">Bed</option><option value="chamber">Chamber</option><option value="max">Hottest of all three</option>
+        </select></div>
+      <div class="row">
+        <div class="field"><label for="f-hyst">Hysteresis <span class="unit">&deg;C</span> <button class="qm" type="button" data-tip="Ignore temperature changes smaller than this before recalculating the fan speed. Prevents the fan hunting up and down around a curve point. Typical 1-3 &deg;C; 0 disables the filter.">?</button></label>
+          <input type="number" id="f-hyst" data-path="fan.hysteresis" min="0" max="50" step="0.5" data-tip="Minimum source-temperature change (&deg;C) before the curve is re-evaluated. Range 0-50, typical 1-3."></div>
+        <div class="field"><label for="f-ramp">Ramp rate <span class="unit">%/s</span> <button class="qm" type="button" data-tip="Limits how fast the output may change, in percent per second. 0 means jump to the new value instantly. 20 %/s takes five seconds to go from stopped to full - quieter, and easier on the fan bearings.">?</button></label>
+          <input type="number" id="f-ramp" data-path="fan.rampRate" min="0" max="1000" step="1" data-tip="Maximum output change in percent per second. Range 0-1000, 0 = instant, typical 10-30."></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="f-min">Minimum speed <span class="unit">%</span> <button class="qm" type="button" data-tip="Outputs below this percentage are forced to 0 %. Many fans buzz or stall instead of spinning at very low duty - set this just above the point where your fan still turns reliably. 0 disables the clamp.">?</button></label>
+          <input type="number" id="f-min" data-path="fan.minSpeed" min="0" max="100" step="1" data-tip="Anything below this percentage is output as 0 %. Range 0-100, typical 15-25 for small fans."></div>
+        <div class="field"><label for="f-kickms">Kick-start <span class="unit">ms</span> <button class="qm" type="button" data-tip="When the fan starts from standstill it runs at 100 % for this many milliseconds so it breaks away, then drops to the requested speed. 300-800 ms is usually enough.">?</button></label>
+          <input type="number" id="f-kickms" data-path="fan.kickMs" min="0" max="5000" step="50" data-tip="Length of the full-power start pulse in milliseconds. Range 0-5000, typical 300-800."></div>
+      </div>
+      <div class="sw"><button type="button" role="switch" aria-checked="false" id="f-kick" data-path="fan.kickStart" aria-labelledby="f-kick-l" data-tip="Give the fan a short burst at 100 % whenever it starts from 0 %, so it reliably breaks away instead of stalling."></button>
+        <span class="txt" id="f-kick-l">Kick-start on start-up<small>Full power for the kick-start time whenever the output leaves 0 %.</small></span></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Safety &amp; gating</h3><span class="grow"></span><button class="qm" type="button" data-tip="What the fan should do when the printer data stops arriving, and whether the curve should only run while a print is actually going.">?</button></header>
+      <div class="row">
+        <div class="field"><label for="f-stalesec">Stale timeout <span class="unit">s</span> <button class="qm" type="button" data-tip="If no MQTT report arrives from the printer for this long, the temperature is considered unusable and the failsafe below takes over. Range 10-3600 s; 120 s is a good default.">?</button></label>
+          <input type="number" id="f-stalesec" data-path="fan.staleSec" min="10" max="3600" step="10" data-tip="Seconds without printer data before the failsafe kicks in. Range 10-3600."></div>
+        <div class="field"><label for="f-stalemode">On stale data <button class="qm" type="button" data-tip="Hold = keep the last output (good when the fan cools electronics), Off = stop the fan (safest for part cooling), Fixed = run at the fixed speed below (good for chamber venting you never want to stop).">?</button></label>
+          <select id="f-stalemode" data-path="fan.staleMode" data-tip="Failsafe behaviour when printer data is stale: hold the last output, switch off, or run at a fixed speed.">
+            <option value="hold">Hold last output</option><option value="off">Switch off</option><option value="fixed">Fixed speed</option></select></div>
+      </div>
+      <div class="field"><label for="f-stalespeed">Fixed stale speed <span class="unit">%</span></label>
+        <input type="number" id="f-stalespeed" data-path="fan.staleSpeed" min="0" max="100" step="1" data-tip="Speed used while the data is stale, when the failsafe above is set to 'Fixed speed'. Range 0-100 %."></div>
+      <div class="sw"><button type="button" role="switch" aria-checked="false" id="f-owp" data-path="fan.onlyWhilePrinting" aria-labelledby="f-owp-l" data-tip="Run the curve only while the printer reports RUNNING, PAUSE, PREPARE or SLICING. Outside a print the fan is switched off once the cooldown has elapsed."></button>
+        <span class="txt" id="f-owp-l">Only while printing<small>Fan stays off when the printer is idle, apart from the cooldown period.</small></span></div>
+      <div class="field" style="margin-top:10px"><label for="f-cool">Cooldown after a print <span class="unit">min</span> <button class="qm" type="button" data-tip="How long the curve keeps running after the print finishes, so a hot nozzle or chamber is still cooled down. Only used when 'Only while printing' is on. Range 0-1440 minutes.">?</button></label>
+        <input type="number" id="f-cool" data-path="fan.cooldownMin" min="0" max="1440" step="1" data-tip="Minutes the curve stays active after the print ends. Range 0-1440, typical 10."></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Outputs</h3><span class="grow"></span><button class="qm" type="button" data-tip="Hardware settings for the two PWM fan outputs (GPIO 17 and GPIO 16). Both carry the same duty cycle.">?</button></header>
+      <div class="row">
+        <div class="field"><label for="f-freq">PWM frequency <span class="unit">Hz</span> <button class="qm" type="button" data-tip="LEDC carrier frequency. 25000 Hz is above hearing, which keeps 4-pin and quality 2-pin fans silent. Some cheap fans or MOSFET boards prefer 1000-8000 Hz. Range 500-40000 Hz.">?</button></label>
+          <input type="number" id="f-freq" data-path="fan.pwmFreq" min="500" max="40000" step="100" data-tip="PWM carrier frequency in Hz. Range 500-40000; 25000 is silent for most fans."></div>
+        <div class="field"><span class="lbl" id="f-inv-title">Signal polarity</span>
+          <div class="sw"><button type="button" role="switch" aria-checked="false" id="f-inv" data-path="fan.pwmInvert" aria-labelledby="f-inv-l" data-tip="Invert the PWM output: duty 0 becomes 255. Needed for driver boards or fan controllers that expect an active-low signal."></button>
+            <span class="txt" id="f-inv-l">Invert PWM<small>For active-low drivers.</small></span></div></div>
+      </div>
+      <div class="sw"><button type="button" role="switch" aria-checked="true" id="f-o1" data-path="fan.output1" aria-labelledby="f-o1-l" data-tip="Enable fan output 1 on GPIO 17. When disabled that pin is held at 0 % regardless of the curve."></button>
+        <span class="txt" id="f-o1-l">Output 1 (GPIO 17)<small>Primary fan connector.</small></span></div>
+      <div class="sw"><button type="button" role="switch" aria-checked="true" id="f-o2" data-path="fan.output2" aria-labelledby="f-o2-l" data-tip="Enable fan output 2 on GPIO 16. It always mirrors the duty of output 1; turn it off if nothing is connected."></button>
+        <span class="txt" id="f-o2-l">Output 2 (GPIO 16)<small>Mirrors output 1.</small></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== PRINTER ==================== -->
+<section id="p-printer" hidden aria-labelledby="h-printer">
+  <div class="page-h"><h2 id="h-printer">Printer</h2><p>Connection to your Bambu Lab printer over local MQTT (TLS, port 8883). All three values come from the printer's network screen.</p></div>
+  <div class="grid">
+    <div class="card">
+      <header><h3>Printer connection</h3></header>
+      <div class="field"><label for="pr-ip">IP address or hostname <button class="qm" type="button" data-tip="Local address of the printer, e.g. 192.168.1.42. Find it on the printer under Settings > Network. A static DHCP lease is recommended - if the address changes the link stops working.">?</button></label>
+        <input type="text" id="pr-ip" data-path="printer.ip" inputmode="decimal" autocomplete="off" placeholder="192.168.1.42" data-tip="Local IP address (or hostname) of the printer. Set a DHCP reservation so it never changes."></div>
+      <div class="field"><label for="pr-code">Access code <button class="qm" type="button" data-tip="The LAN access code shown on the printer under Settings > Network > LAN Only Mode. It is exactly 8 characters long. It is the MQTT password. Stored on the device and never shown again - the field displays asterisks until you type a new code.">?</button></label>
+        <div class="row"><input type="password" id="pr-code" data-path="printer.accessCode" maxlength="8" minlength="8" pattern="^(\*{8}|.{8})$" autocomplete="off" spellcheck="false" style="flex:1 1 120px" data-tip="LAN access code from the printer's network screen. It must be exactly 8 characters - the device rejects any other length.">
+          <button class="btn sm" type="button" data-reveal="pr-code" aria-pressed="false" data-tip="Show or hide the access code."><svg aria-hidden="true"><use href="#i-eye"/></svg><span class="sr">Show access code</span></button></div></div>
+      <div class="field"><label for="pr-serial">Serial number <button class="qm" type="button" data-tip="The printer's serial number, e.g. 01P00A123456789. It forms the MQTT topics device/&lt;serial&gt;/report and .../request, so a typo means no data at all. Automatically upper-cased.">?</button></label>
+        <input type="text" id="pr-serial" data-path="printer.serial" autocomplete="off" spellcheck="false" class="mono" placeholder="01P00A000000000" data-tip="Printer serial number - used in the MQTT topic. Letters are upper-cased automatically."></div>
+      <div class="field"><label for="pr-model">Model <button class="qm" type="button" data-tip="Selects how the printer reports data. Auto detects it from the first messages. P1 and A1 only send changes, so the device asks for a full 'pushall' refresh every 5 minutes. H2D decoding is best effort.">?</button></label>
+        <select id="pr-model" data-path="printer.model" data-tip="Printer family. Auto works for most setups; P1/A1 enable a periodic full-status request.">
+          <option value="auto">Auto detect</option><option value="x1">X1 / X1C / X1E</option><option value="p1">P1P / P1S</option><option value="a1">A1 / A1 mini</option><option value="h2d">H2D (best effort)</option></select></div>
+      <div class="btns"><button class="btn primary" id="prSave" data-section="printer" data-tip="Save only this card's printer settings and reconnect the MQTT client immediately. Other unsaved changes stay in the save bar. No reboot needed."><svg aria-hidden="true"><use href="#i-save"/></svg>Save &amp; reconnect</button></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Live status</h3><span class="grow"></span><span class="badge" id="prBadge">-</span></header>
+      <p class="hint">This card is fed by the same event stream as the dashboard - it is the connection test: if temperatures are moving, the link works.</p>
+      <dl class="kv">
+        <dt>MQTT state</dt><dd id="prState">-</dd>
+        <dt>Last report</dt><dd id="prAge">-</dd>
+        <dt>Printer state</dt><dd id="prPState">-</dd>
+        <dt>Nozzle</dt><dd id="prNoz">-</dd>
+        <dt>Bed</dt><dd id="prBed">-</dd>
+        <dt>Chamber</dt><dd id="prCha">-</dd>
+        <dt>Print error</dt><dd id="prErr">-</dd>
+      </dl>
+      <div class="banner" style="margin:12px 0 0"><svg aria-hidden="true"><use href="#i-info"/></svg><span><b>Not connecting?</b>Check that LAN Only Mode / developer mode is enabled on the printer, that the access code is the current one (it changes when you re-enable LAN mode) and that the serial matches exactly.</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== NETWORK ==================== -->
+<section id="p-network" hidden aria-labelledby="h-network">
+  <div class="page-h"><h2 id="h-network">Network</h2><p>WiFi credentials for the device itself. Saving always requires a restart.</p></div>
+  <div id="apBanner" hidden class="banner warn"><svg aria-hidden="true"><use href="#i-alert"/></svg><span><b>Access point mode - the device is not on your WiFi yet.</b>You are connected to the device's own hotspot. Pick your network below, enter the password and save. The device restarts, joins your WiFi, and this hotspot disappears.</span></div>
+  <div id="apDone" hidden class="banner"><svg aria-hidden="true"><use href="#i-info"/></svg><span><b>Saved - the device is restarting.</b>Reconnect your phone or computer to your normal WiFi, then open <b id="apUrl">http://blsmartflow.local/</b>. If that name does not resolve, look up the device's new IP address in your router.</span></div>
+  <div class="grid">
+    <div class="card">
+      <header><h3>WiFi</h3><span class="grow"></span><button class="btn sm" id="scanBtn" data-tip="Runs a fresh 2.4 GHz scan (takes ~3 s). The ESP32 has no 5 GHz radio, so 5 GHz-only networks never appear here."><svg aria-hidden="true"><use href="#i-refresh"/></svg>Scan</button></header>
+      <ul class="netlist" id="netList" hidden></ul>
+      <p class="hint" id="scanHint" hidden>Scanning...</p>
+      <div class="field" style="margin-top:12px"><label for="wf-ssid">Network name (SSID) <button class="qm" type="button" data-tip="Name of your 2.4 GHz WiFi network. Case sensitive. Pick one from the scan list to fill this in automatically, or type a hidden network's name by hand.">?</button></label>
+        <input type="text" id="wf-ssid" autocomplete="off" data-tip="Your 2.4 GHz network name. The ESP32 cannot use 5 GHz networks."></div>
+      <div class="field"><label for="wf-pass">Password <button class="qm" type="button" data-tip="WPA/WPA2 passphrase, 8-63 characters. Leave the asterisks untouched to keep the stored password. Leave empty for an open network.">?</button></label>
+        <div class="row"><input type="password" id="wf-pass" autocomplete="off" style="flex:1 1 120px" data-tip="WiFi passphrase (8-63 characters). Untouched asterisks mean 'keep the saved password'.">
+          <button class="btn sm" type="button" data-reveal="wf-pass" aria-pressed="false" data-tip="Show or hide the WiFi password."><svg aria-hidden="true"><use href="#i-eye"/></svg><span class="sr">Show password</span></button></div></div>
+      <div class="sw"><button type="button" role="switch" aria-checked="false" id="wf-lock" aria-labelledby="wf-lock-l" data-tip="Bind the connection to one specific access point (BSSID) instead of letting the device roam. Speeds up reconnects in a mesh, but if that access point is switched off the device cannot connect until it drops the lock after three failed attempts."></button>
+        <span class="txt" id="wf-lock-l">Lock to this access point<small id="wf-bssid">BSSID: -</small></span></div>
+      <div class="field" style="margin-top:10px"><label for="wf-host">Hostname <button class="qm" type="button" data-tip="Name used for mDNS and DHCP: the UI is then reachable at http://&lt;hostname&gt;.local/. Letters, digits and hyphens, up to 63 characters.">?</button></label>
+        <input type="text" id="wf-host" data-tip="mDNS/DHCP hostname, reachable as http://<hostname>.local/. Letters, digits, hyphens."></div>
+      <div class="btns"><button class="btn primary" id="wfSave" data-tip="Store the credentials and restart the device so it joins the selected network."><svg aria-hidden="true"><use href="#i-save"/></svg>Save &amp; restart</button></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Current connection</h3><span class="grow"></span><span class="badge" id="wfBadge">-</span></header>
+      <dl class="kv">
+        <dt>SSID</dt><dd id="wfSsid">-</dd>
+        <dt>IP address</dt><dd id="wfIp">-</dd>
+        <dt>Signal</dt><dd id="wfRssi">-</dd>
+        <dt>Access point</dt><dd id="wfBss" class="mono">-</dd>
+        <dt>Channel</dt><dd id="wfCh">-</dd>
+        <dt>mDNS</dt><dd id="wfMdns">-</dd>
+      </dl>
+      <p class="hint" style="margin:10px 0 0">Signal quality: better than -60 dBm is excellent, -70 dBm still fine, below -80 dBm expect dropouts.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== INTEGRATIONS ==================== -->
+<section id="p-integrations" hidden aria-labelledby="h-int">
+  <div class="page-h"><h2 id="h-int">Integrations</h2><p>Publish status to your own MQTT broker, expose the fan to Home Assistant, or drive everything from the REST API.</p></div>
+  <div class="grid wide">
+    <div class="card">
+      <header><h3>External MQTT broker</h3><span class="grow"></span><span class="badge" id="mqBadge">-</span></header>
+      <div class="sw"><button type="button" role="switch" aria-checked="false" id="mq-en" data-path="mqtt.enabled" aria-labelledby="mq-en-l" data-tip="Connect to your own MQTT broker (Mosquitto, Home Assistant add-on, ...) to publish status and accept commands. This is separate from the printer link."></button>
+        <span class="txt" id="mq-en-l">Enable broker link<small>Publishes status and accepts fan commands.</small></span></div>
+      <div class="row" style="margin-top:10px">
+        <div class="field" style="flex:3 1 160px"><label for="mq-host">Broker host <button class="qm" type="button" data-tip="IP address or hostname of your MQTT broker, e.g. 192.168.1.10 or homeassistant.local. Plain TCP only - no TLS on this link.">?</button></label>
+          <input type="text" id="mq-host" data-path="mqtt.host" autocomplete="off" placeholder="192.168.1.10" data-tip="Hostname or IP of your MQTT broker (unencrypted TCP)."></div>
+        <div class="field" style="flex:1 1 80px"><label for="mq-port">Port</label>
+          <input type="number" id="mq-port" data-path="mqtt.port" min="1" max="65535" data-tip="Broker TCP port. 1883 is the standard unencrypted port."></div>
+      </div>
+      <div class="row">
+        <div class="field"><label for="mq-user">Username</label><input type="text" id="mq-user" data-path="mqtt.user" autocomplete="off" data-tip="Broker username. Leave empty for an anonymous broker."></div>
+        <div class="field"><label for="mq-pass">Password</label>
+          <div class="row"><input type="password" id="mq-pass" data-path="mqtt.password" autocomplete="off" style="flex:1 1 100px" data-tip="Broker password. Asterisks mean the stored password is kept; type to replace it.">
+            <button class="btn sm" type="button" data-reveal="mq-pass" aria-pressed="false" data-tip="Show or hide the broker password."><svg aria-hidden="true"><use href="#i-eye"/></svg><span class="sr">Show password</span></button></div></div>
+      </div>
+      <div class="field"><label for="mq-base">Base topic <button class="qm" type="button" data-tip="Prefix for every topic this device uses. Leave empty to use blsmartflow/&lt;chipid&gt;, which is unique per device. No leading or trailing slash.">?</button></label>
+        <input type="text" id="mq-base" data-path="mqtt.baseTopic" autocomplete="off" spellcheck="false" class="mono" data-tip="Topic prefix, e.g. workshop/fan. Empty = blsmartflow/<chipid>."></div>
+      <div class="row">
+        <div class="field"><label for="mq-int">Publish interval <span class="unit">s</span> <button class="qm" type="button" data-tip="How often the full status object is published to &lt;base&gt;/state. Fan speed changes are published immediately regardless. Lower values mean more broker traffic. Range 1-3600 s.">?</button></label>
+          <input type="number" id="mq-int" data-path="mqtt.publishIntervalSec" min="1" max="3600" data-tip="Seconds between full status publishes. Range 1-3600, typical 10."></div>
+        <div class="field"><label for="mq-prefix">Discovery prefix <button class="qm" type="button" data-tip="Home Assistant's MQTT discovery prefix. Leave it at 'homeassistant' unless you changed it in the HA MQTT integration settings.">?</button></label>
+          <input type="text" id="mq-prefix" data-path="mqtt.haPrefix" autocomplete="off" class="mono" data-tip="Home Assistant discovery prefix, normally 'homeassistant'."></div>
+      </div>
+      <div class="sw"><button type="button" role="switch" aria-checked="true" id="mq-ha" data-path="mqtt.haDiscovery" aria-labelledby="mq-ha-l" data-tip="Publish retained Home Assistant discovery messages so the fan, mode select, sensors and restart button appear automatically. Switching this off removes the entities again."></button>
+        <span class="txt" id="mq-ha-l">Home Assistant discovery<small>Creates a fan, a mode select, temperature/progress sensors and a restart button.</small></span></div>
+      <div class="btns"><button class="btn primary" id="mqSave" data-section="mqtt" data-tip="Save only this card's broker settings and (re)connect immediately. Other unsaved changes stay in the save bar. No restart required."><svg aria-hidden="true"><use href="#i-save"/></svg>Save &amp; connect</button></div>
+    </div>
+
+    <div class="card">
+      <header><h3>MQTT topics</h3><span class="grow"></span><button class="qm" type="button" data-tip="Every topic this device uses, built from the base topic above. Use the copy buttons to paste them into an automation.">?</button></header>
+      <div class="tablewrap"><table><thead><tr><th>Topic</th><th class="nowrap">Dir</th><th>Payload</th><th><span class="sr">Copy</span></th></tr></thead><tbody id="topicRows"></tbody></table></div>
+    </div>
+
+    <div class="card span2">
+      <header><h3>REST API</h3><span class="grow"></span><button class="qm" type="button" data-tip="The same HTTP API this page uses. Bodies are JSON; errors come back as {&quot;error&quot;:&quot;...&quot;} with a 4xx status. If web authentication is on, add -u user:password to curl.">?</button></header>
+      <div class="tablewrap"><table><thead><tr><th class="nowrap">Method</th><th>Path</th><th>Purpose</th><th>Example</th></tr></thead><tbody id="apiRows"></tbody></table></div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== SYSTEM ==================== -->
+<section id="p-system" hidden aria-labelledby="h-sys">
+  <div class="page-h"><h2 id="h-sys">System</h2><p>Firmware, backups, diagnostics and access control.</p></div>
+  <div class="grid wide">
+    <div class="card">
+      <header><h3>Device</h3><span class="grow"></span><button class="btn sm ghost" id="infoRefresh" data-tip="Re-read /api/info from the device."><svg aria-hidden="true"><use href="#i-refresh"/></svg><span class="sr">Refresh</span></button></header>
+      <dl class="kv" id="infoKv"><dt>Firmware</dt><dd>-</dd></dl>
+    </div>
+
+    <div class="card">
+      <header><h3>Firmware update</h3><span class="grow"></span><button class="qm" type="button" data-tip="Upload a compiled firmware.bin over the air. It is written to the inactive OTA slot; if the upload fails the current firmware keeps running. Do not power off during the update.">?</button></header>
+      <div class="field"><label for="otaFile">Firmware image (.bin)</label>
+        <input type="file" id="otaFile" accept=".bin,application/octet-stream" data-tip="Select the firmware.bin built for this board. Uploading the wrong image can brick the device until you reflash over USB."></div>
+      <div class="btns"><button class="btn primary" id="otaBtn" data-tip="Start the upload. Progress is shown below; the device restarts automatically when it succeeds."><svg aria-hidden="true"><use href="#i-up"/></svg>Upload &amp; flash</button></div>
+      <div class="prog" id="otaProgWrap" hidden><i id="otaProg"></i></div>
+      <p class="hint" id="otaMsg" style="margin-top:8px">No upload started.</p>
+    </div>
+
+    <div class="card">
+      <header><h3>Backup &amp; restore</h3><span class="grow"></span><button class="qm" type="button" data-tip="The backup file contains the full configuration including the WiFi password and printer access code in plain text - keep it somewhere safe.">?</button></header>
+      <div class="btns" style="margin-top:0">
+        <a class="btn" id="backupBtn" href="/api/backup" download data-tip="Download the complete configuration as JSON, secrets included."><svg aria-hidden="true"><use href="#i-dl"/></svg>Download backup</a>
+      </div>
+      <div class="field" style="margin-top:14px"><label for="restoreFile">Restore from file</label>
+        <input type="file" id="restoreFile" accept=".json,application/json" data-tip="Pick a previously downloaded backup JSON. It replaces the whole configuration and restarts the device."></div>
+      <div class="btns"><button class="btn" id="restoreBtn" data-tip="Upload the selected backup file and restart the device with it."><svg aria-hidden="true"><use href="#i-up"/></svg>Restore &amp; restart</button></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Web access</h3><span class="grow"></span><button class="qm" type="button" data-tip="HTTP basic authentication for this page and the whole API. It is not encrypted - it keeps casual visitors out of a trusted LAN, nothing more. Access point mode always stays open so you cannot lock yourself out.">?</button></header>
+      <div class="sw"><button type="button" role="switch" aria-checked="false" id="wb-en" data-path="web.authEnabled" aria-labelledby="wb-en-l" data-tip="Require a username and password for the UI and every /api route. Takes effect immediately - the very next request already needs the password."></button>
+        <span class="txt" id="wb-en-l">Require login<small>Takes effect immediately - the very next request already needs the password.</small></span></div>
+      <div class="row" style="margin-top:10px">
+        <div class="field"><label for="wb-user">Username</label><input type="text" id="wb-user" data-path="web.user" autocomplete="off" data-tip="Username for the browser's login prompt. Default 'admin'."></div>
+        <div class="field"><label for="wb-pass">Password</label>
+          <div class="row"><input type="password" id="wb-pass" data-path="web.password" autocomplete="new-password" style="flex:1 1 100px" data-tip="Login password. Asterisks mean the stored password is kept. An empty password with login enabled locks nobody out - set one.">
+            <button class="btn sm" type="button" data-reveal="wb-pass" aria-pressed="false" data-tip="Show or hide the password."><svg aria-hidden="true"><use href="#i-eye"/></svg><span class="sr">Show password</span></button></div></div>
+      </div>
+      <div class="btns"><button class="btn primary" id="webSave" data-section="web" data-tip="Save only this card's authentication settings. Takes effect immediately - the very next request already needs the password."><svg aria-hidden="true"><use href="#i-save"/></svg>Save</button></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Diagnostics</h3></header>
+      <div class="sw"><button type="button" role="switch" aria-checked="true" id="db-ser" data-path="debug.serial" aria-labelledby="db-ser-l" data-tip="Write log lines to the USB serial port at 115200 baud as well as to the ring buffer below. Turn it off to keep the serial port quiet for provisioning."></button>
+        <span class="txt" id="db-ser-l">Serial logging<small>Mirror the log to USB serial (115200 baud).</small></span></div>
+      <div class="sw"><button type="button" role="switch" aria-checked="false" id="db-mq" data-path="debug.mqttDump" aria-labelledby="db-mq-l" data-tip="Print every filtered MQTT report from the printer to the log. Very noisy - only enable while diagnosing missing temperatures, then turn it off again."></button>
+        <span class="txt" id="db-mq-l">Dump printer MQTT<small>Logs each parsed report. Noisy.</small></span></div>
+      <div class="sw"><button type="button" role="switch" aria-checked="true" id="sd-en" data-path="ssdp.enabled" aria-labelledby="sd-en-l" data-tip="Announce the device over UPnP/SSDP so it shows up in Windows' Network view and other discovery tools. Costs a little RAM and some multicast traffic."></button>
+        <span class="txt" id="sd-en-l">SSDP discovery<small>Appear in Windows Network / UPnP browsers.</small></span></div>
+      <div class="btns"><button class="btn primary" id="diagSave" data-section="debug" data-tip="Save only this card's diagnostic and discovery settings. They apply immediately; other unsaved changes stay in the save bar."><svg aria-hidden="true"><use href="#i-save"/></svg>Save</button></div>
+    </div>
+
+    <div class="card">
+      <header><h3>Maintenance</h3></header>
+      <div class="btns" style="margin-top:0">
+        <button class="btn" id="restartBtn" data-tip="Reboot the device. Fan outputs drop to 0 % for a few seconds while it starts up."><svg aria-hidden="true"><use href="#i-power"/></svg>Restart</button>
+      </div>
+      <div class="banner err" style="margin:14px 0 10px"><svg aria-hidden="true"><use href="#i-alert"/></svg><span><b>Factory reset</b>Erases the WiFi credentials, printer settings and fan curve, then restarts into access point mode. There is no undo - download a backup first.</span></div>
+      <div class="field"><label for="frText">Type <b>RESET</b> to confirm</label>
+        <input type="text" id="frText" autocomplete="off" spellcheck="false" placeholder="RESET" data-tip="Type RESET in capitals to unlock the factory reset button."></div>
+      <div class="btns"><button class="btn danger" id="frBtn" disabled data-tip="Wipe the configuration and restart into access point mode."><svg aria-hidden="true"><use href="#i-trash"/></svg>Factory reset</button></div>
+    </div>
+
+    <div class="card span2">
+      <header><h3>Log</h3><span class="grow"></span>
+        <button class="btn sm" id="logPause" aria-pressed="false" data-tip="Stop appending new lines so you can read or copy the current output. New lines are dropped while paused.">Pause</button>
+        <button class="btn sm" id="logClear" data-tip="Clear the lines shown here. The device's own 64-line ring buffer is not affected.">Clear</button>
+      </header>
+      <div id="logbox" role="log" aria-label="Device log" tabindex="0"></div>
+      <p class="hint" style="margin:8px 0 0">The device keeps the last 64 lines; new lines arrive live over the event stream.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+<nav id="tabs" aria-label="Sections"></nav>
+</div>
+
+<div id="savebar" role="region" aria-label="Unsaved changes">
+  <span class="t" id="savebarText">Unsaved changes</span>
+  <button class="btn sm" id="revertBtn" data-tip="Discard the changes and reload the values stored on the device."><svg aria-hidden="true"><use href="#i-undo"/></svg>Revert</button>
+  <button class="btn sm primary" id="saveBtn" data-tip="Write the changed settings to the device. Only the fields you edited are sent."><svg aria-hidden="true"><use href="#i-save"/></svg>Save</button>
+</div>
+<div id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+<div id="tip" role="tooltip"></div>
+<script>
+"use strict";
+/* =========================================================================
+   BLSmartFlow 2.0 UI - vanilla JS, no build step.
+   Layout: utils / state / api / toasts / tooltip / theme / nav /
+           config binding / status rendering / curve editor / pages / live
+   ========================================================================= */
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const num = (v, d) => (v == null || v === "" || isNaN(+v)) ? d : +v;
+const MASK = "********";
+
+/* ---------------------------- state ---------------------------- */
+const S = {
+  cfg: null,          // last config as stored on the device (secrets masked)
+  st: null,           // last status object
+  dirty: {},          // "fan.minSpeed" -> value, only what the user changed
+  curve: [],          // working copy of the curve
+  curveSaved: [],     // curve as stored on the device
+  sel: -1,            // selected curve point
+  range: 400,         // temperature axis preference (100 or 400)
+  page: "dashboard",
+  lastStatus: 0,
+  topicBase: null,
+  wifiPassTouched: false,
+  wifiFormTouched: false,   // the user is editing the network form - do not overwrite it
+  logPaused: false
+};
+const PAGES = [
+  ["dashboard", "Dashboard", "i-dash"], ["curve", "Fan curve", "i-curve"],
+  ["printer", "Printer", "i-printer"], ["network", "Network", "i-wifi"],
+  ["integrations", "Integrations", "i-plug"], ["system", "System", "i-gear"]
+];
+
+/* ---------------------------- api ------------------------------ */
+async function api(method, path, body) {
+  const opt = { method, headers: {} };
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  let res;
+  try { res = await fetch(path, opt); }
+  catch (e) { throw new Error("Cannot reach the device (" + (e.message || "network error") + ")"); }
+  if (res.status === 401) throw new Error("Not authorised - reload the page and sign in.");
+  const txt = await res.text();
+  let data = null;
+  if (txt) { try { data = JSON.parse(txt); } catch (e) { if (!res.ok) throw new Error("HTTP " + res.status + ": " + txt.slice(0, 120)); } }
+  if (!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
+  return data;
+}
+
+/* --------------------------- toasts ---------------------------- */
+function toast(msg, kind) {
+  const box = $("#toasts");
+  const t = document.createElement("div");
+  t.className = "toast " + (kind || "");
+  t.textContent = msg;
+  box.appendChild(t);
+  setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .3s"; setTimeout(() => t.remove(), 320); },
+    kind === "err" ? 7000 : 3800);
+  while (box.children.length > 4) box.firstChild.remove();
+}
+const fail = e => toast(e && e.message ? e.message : String(e), "err");
+
+/* -------------------------- tooltip ---------------------------- */
+/* One shared bubble for every [data-tip]. Hover + focus + tap on the "?" icons. */
+const Tip = (() => {
+  const el = $("#tip"); let cur = null;
+  el.id = "tip";
+  function show(target) {
+    const text = target.getAttribute("data-tip"); if (!text) return;
+    cur = target; el.textContent = text; el.classList.add("on");
+    target.setAttribute("aria-describedby", "tip");
+    const r = target.getBoundingClientRect(), b = el.getBoundingClientRect();
+    let x = r.left + r.width / 2 - b.width / 2;
+    x = clamp(x, 8, Math.max(8, innerWidth - b.width - 8));
+    let y = r.top - b.height - 8;
+    if (y < 8) y = Math.min(r.bottom + 8, innerHeight - b.height - 8);
+    el.style.left = x + "px"; el.style.top = y + "px";
+  }
+  function hide() {
+    el.classList.remove("on");
+    if (cur) { cur.removeAttribute("aria-describedby"); if (cur.classList.contains("qm")) cur.setAttribute("aria-expanded", "false"); }
+    cur = null;
+  }
+  document.addEventListener("pointerover", e => { const t = e.target.closest("[data-tip]"); if (t && t !== cur && e.pointerType !== "touch") show(t); });
+  document.addEventListener("pointerout", e => { if (cur && e.pointerType !== "touch" && !e.relatedTarget?.closest?.("[data-tip]")) hide(); });
+  document.addEventListener("focusin", e => { const t = e.target.closest("[data-tip]"); t ? show(t) : hide(); });
+  document.addEventListener("focusout", () => hide());
+  document.addEventListener("click", e => {
+    const q = e.target.closest(".qm");
+    if (q) { e.preventDefault(); if (cur === q) hide(); else { hide(); q.setAttribute("aria-expanded", "true"); show(q); } }
+    else if (cur && !e.target.closest("[data-tip]")) hide();
+  });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") hide(); });
+  addEventListener("scroll", hide, true); addEventListener("resize", hide);
+  return { hide };
+})();
+/* every "?" button is a real button for screen readers */
+$$(".qm").forEach(q => { q.setAttribute("aria-expanded", "false"); q.setAttribute("aria-label", "Explain this setting"); });
+
+/* --------------------------- theme ----------------------------- */
+const THEMES = [["system", "i-auto", "System theme"], ["light", "i-sun", "Light theme"], ["dark", "i-moon", "Dark theme"]];
+function setTheme(t) {
+  const i = Math.max(0, THEMES.findIndex(x => x[0] === t));
+  const [name, icon, label] = THEMES[i];
+  if (name === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", name);
+  $("#themeBtn").innerHTML = '<svg aria-hidden="true"><use href="#' + icon + '"/></svg>';
+  $("#themeBtn").setAttribute("aria-label", label + " (click to change)");
+  try { localStorage.setItem("blsf-theme", name); } catch (e) { }
+}
+let themeName = "system";
+try { themeName = localStorage.getItem("blsf-theme") || "system"; } catch (e) { }
+setTheme(themeName);
+$("#themeBtn").addEventListener("click", () => {
+  const i = THEMES.findIndex(x => x[0] === (document.documentElement.getAttribute("data-theme") || "system"));
+  themeName = THEMES[(i + 1) % THEMES.length][0]; setTheme(themeName);
+});
+
+/* ---------------------------- nav ------------------------------ */
+function buildNav() {
+  const side = $("#side"), tabs = $("#tabs");
+  PAGES.forEach(([id, label, icon]) => {
+    const mk = short => {
+      const b = document.createElement("button");
+      b.type = "button"; b.dataset.page = id;
+      b.innerHTML = '<svg aria-hidden="true"><use href="#' + icon + '"/></svg><span>' + (short ? label.replace("Fan curve", "Curve").replace("Integrations", "MQTT") : label) + "</span>";
+      b.addEventListener("click", () => go(id));
+      return b;
+    };
+    side.appendChild(mk(false)); tabs.appendChild(mk(true));
+  });
+}
+function go(id) {
+  S.page = id;
+  PAGES.forEach(([p]) => { const s = $("#p-" + p); if (s) s.hidden = p !== id; });
+  $$("[data-page]").forEach(b => b.dataset.page === id ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
+  if (location.hash.slice(1) !== id) history.replaceState(null, "", "#" + id);
+  if (id === "curve") requestAnimationFrame(drawCurve);
+  scrollTo(0, 0);
+}
+addEventListener("hashchange", () => { const h = location.hash.slice(1); if (PAGES.some(p => p[0] === h)) go(h); });
+
+/* --------------------- config <-> controls --------------------- */
+function getPath(o, p) { return p.split(".").reduce((a, k) => (a == null ? a : a[k]), o); }
+function setPath(o, p, v) { const k = p.split("."); let c = o; k.slice(0, -1).forEach(x => { c = c[x] = c[x] || {}; }); c[k[k.length - 1]] = v; }
+const bound = () => $$("[data-path]");
+function ctlGet(el) {
+  if (el.getAttribute("role") === "switch") return el.getAttribute("aria-checked") === "true";
+  if (el.type === "number") return num(el.value, 0);
+  return el.value;
+}
+function ctlSet(el, v) {
+  if (el.getAttribute("role") === "switch") el.setAttribute("aria-checked", v ? "true" : "false");
+  else el.value = v == null ? "" : v;
+}
+/** Fill every bound control from the config the device reported. */
+function applyConfig(cfg) {
+  // controls the user has edited but not saved yet keep what they typed
+  bound().forEach(el => {
+    if (el.dataset.path in S.dirty) return;
+    const v = getPath(cfg, el.dataset.path); if (v !== undefined) ctlSet(el, v);
+  });
+  S.curveSaved = JSON.parse(JSON.stringify(cfg.fan.curve || []));
+  if (!S.curve.length) S.curve = JSON.parse(JSON.stringify(S.curveSaved));
+  // the network form is saved through /api/wifi, so it is filled separately - and
+  // never refilled underneath the user once they have touched it
+  if (!S.wifiFormTouched) {
+    $("#wf-ssid").value = cfg.wifi.ssid || "";
+    $("#wf-pass").value = cfg.wifi.password || "";
+    $("#wf-host").value = cfg.wifi.hostname || "";
+    $("#wf-lock").setAttribute("aria-checked", cfg.wifi.lockBssid ? "true" : "false");
+    $("#wf-bssid").textContent = "BSSID: " + (cfg.wifi.bssid || "not set");
+    S.wifiPassTouched = false;
+  }
+  renderTopics();
+}
+function markDirty(path, val) { S.dirty[path] = val; updateSaveBar(); }
+function curveDirty() { return JSON.stringify(S.curve) !== JSON.stringify(S.curveSaved); }
+function updateSaveBar() {
+  const n = Object.keys(S.dirty).length + (curveDirty() ? 1 : 0);
+  $("#savebar").classList.toggle("on", n > 0);
+  $("#savebarText").textContent = n === 0 ? "" :
+    (curveDirty() && Object.keys(S.dirty).length === 0 ? "Fan curve changed - not saved yet"
+      : n + " unsaved change" + (n > 1 ? "s" : ""));
+}
+function wireControls() {
+  bound().forEach(el => {
+    if (el.getAttribute("role") === "switch") {
+      el.addEventListener("click", () => {
+        const v = el.getAttribute("aria-checked") !== "true";
+        el.setAttribute("aria-checked", v ? "true" : "false");
+        markDirty(el.dataset.path, v);
+      });
+    } else {
+      el.addEventListener("input", () => markDirty(el.dataset.path, ctlGet(el)));
+      el.addEventListener("change", () => markDirty(el.dataset.path, ctlGet(el)));
+    }
+  });
+  $("#pr-serial").addEventListener("input", e => { const p = e.target.selectionStart; e.target.value = e.target.value.toUpperCase(); e.target.setSelectionRange(p, p); });
+  $$("[data-reveal]").forEach(b => b.addEventListener("click", () => {
+    const i = document.getElementById(b.dataset.reveal), on = i.type === "password";
+    i.type = on ? "text" : "password"; b.setAttribute("aria-pressed", on ? "true" : "false");
+  }));
+  ["pr-code", "mq-pass", "wb-pass"].forEach(id => {
+    const i = document.getElementById(id);
+    i.addEventListener("focus", () => { if (i.value === MASK) { i.value = ""; } });
+    /* left empty without typing → the stored secret is unchanged, so show the mask again */
+    i.addEventListener("blur", () => { if (i.value === "" && !(i.dataset.path in S.dirty)) i.value = MASK; });
+  });
+  $("#wf-pass").addEventListener("input", () => { S.wifiPassTouched = true; });
+  $("#wf-pass").addEventListener("focus", e => { if (e.target.value === MASK) e.target.value = ""; });
+}
+
+/* The firmware rejects an access code that is not exactly 8 characters, so catch it here. */
+function accessCodeOk(paths) {
+  if (paths.indexOf("printer.accessCode") < 0) return true;
+  const v = String(S.dirty["printer.accessCode"] == null ? "" : S.dirty["printer.accessCode"]);
+  if (v.length === 8) return true;
+  toast("The printer access code must be exactly 8 characters (" + v.length + " entered).", "err");
+  go("printer"); $("#pr-code").focus();
+  return false;
+}
+
+/* Which config paths belong to which card's Save button. */
+const SECTIONS = { printer: ["printer."], mqtt: ["mqtt."], web: ["web."], debug: ["debug.", "ssdp."] };
+
+/** Save one card: only the dirty paths in that section. Everything else stays pending. */
+async function saveSection(name) {
+  const prefixes = SECTIONS[name] || [];
+  const paths = Object.keys(S.dirty).filter(p => prefixes.some(x => p.indexOf(x) === 0));
+  if (!paths.length) { toast("Nothing to save in this card."); return; }
+  if (!accessCodeOk(paths)) return;
+  const btn = $("[data-section=" + name + "]"); if (btn) btn.disabled = true;
+  try {
+    const patch = {};
+    paths.forEach(p => setPath(patch, p, S.dirty[p]));
+    const r = await api("POST", "/api/config", patch);
+    paths.forEach(p => { delete S.dirty[p]; });
+    if (r && r.config) { S.cfg = r.config; applyConfig(r.config); }
+    toast("Saved " + paths.length + " setting" + (paths.length > 1 ? "s" : ""), "ok");
+    if (r && r.restartRequired) toast("A restart is required before these settings take effect.", "warn");
+  } catch (e) { fail(e); }
+  finally { if (btn) btn.disabled = false; updateSaveBar(); }
+}
+
+/** Save every pending change: curve via PUT /api/curve, the rest via POST /api/config. */
+async function saveAll() {
+  if (!accessCodeOk(Object.keys(S.dirty))) return;
+  const btn = $("#saveBtn"); btn.disabled = true;
+  try {
+    if (curveDirty()) {
+      const r = await api("PUT", "/api/curve", { points: S.curve });
+      S.curveSaved = JSON.parse(JSON.stringify(r.points));
+      S.curve = JSON.parse(JSON.stringify(r.points));
+      if (S.cfg) S.cfg.fan.curve = r.points;
+      renderCurveTable(); drawCurve();
+      toast("Fan curve saved (" + r.points.length + " points)", "ok");
+    }
+    const paths = Object.keys(S.dirty);
+    if (paths.length) {
+      const patch = {};
+      paths.forEach(p => setPath(patch, p, S.dirty[p]));
+      const r = await api("POST", "/api/config", patch);
+      S.dirty = {};
+      if (r && r.config) { S.cfg = r.config; applyConfig(r.config); }
+      toast("Settings saved", "ok");
+      if (r && r.restartRequired) toast("A restart is required before these settings take effect.", "warn");
+    }
+  } catch (e) { fail(e); }
+  finally { btn.disabled = false; updateSaveBar(); }
+}
+async function revertAll() {
+  S.dirty = {}; S.wifiFormTouched = false;
+  try { const cfg = await api("GET", "/api/config"); S.cfg = cfg; S.curve = JSON.parse(JSON.stringify(cfg.fan.curve)); applyConfig(cfg); }
+  catch (e) { fail(e); }
+  S.sel = -1; renderCurveTable(); drawCurve(); updateSaveBar();
+  toast("Reloaded the values stored on the device");
+}
+
+/* ----------------------- status rendering ---------------------- */
+const MODES = {
+  auto: ["Automatic", "The fan follows the curve using the selected source temperature."],
+  manual: ["Manual", "A fixed speed set by you; the curve is ignored until you switch back to auto."],
+  off: ["Off", "Both outputs are held at 0 % - the curve is not evaluated."],
+  stale: ["Stale data - failsafe", "No fresh data from the printer, so the stale-data failsafe from the Fan Curve page decides the output."],
+  idle: ["Idle", "'Only while printing' is on and no print is running, so the fan stays off."],
+  cooldown: ["Cooldown", "The print has finished; the curve keeps running until the cooldown time expires."]
+};
+const bars = (rssi, n) => { n = n == null ? (rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -75 ? 2 : rssi >= -85 ? 1 : 0) : n; let h = ""; for (let i = 1; i <= 4; i++) h += '<i class="' + (i <= n ? "on" : "") + '"></i>'; return '<span class="bars" aria-hidden="true">' + h + "</span>"; };
+const badge = (cls, tip, html) => '<span class="badge ' + cls + '" data-tip="' + esc(tip) + '"><span class="dot"></span>' + html + "</span>";
+const t1 = v => v == null ? "--" : (Math.round(v * 10) / 10).toFixed(1);
+const dur = s => s < 60 ? s + " s" : s < 3600 ? Math.floor(s / 60) + " min" : Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min";
+/* printer.lastUpdateSec is null until the very first report ever arrives */
+const seen = s => s == null ? "never" : s + " s ago";
+
+function renderStatus(st) {
+  S.st = st; S.lastStatus = Date.now(); connBanner(false);
+  const f = st.fan, p = st.printer, w = st.wifi, d = st.device, t = p.temps || {};
+  /* --- fan gauge --- */
+  $("#fanOut").textContent = f.output;
+  $("#gaugeArc").setAttribute("stroke-dashoffset", String(289 - 289 * clamp(f.output, 0, 100) / 100));
+  const blades = $(".fan .blades");
+  blades.style.animationPlayState = f.output > 0 ? "running" : "paused";
+  if (f.output > 0) blades.style.animationDuration = (2.2 - 0.019 * f.output).toFixed(2) + "s";
+  const m = MODES[f.effectiveMode] || [f.effectiveMode, ""];
+  $("#modeChip").textContent = m[0];
+  $("#modeChip").style.color = f.effectiveMode === "stale" ? "var(--err)" : f.effectiveMode === "auto" ? "var(--ok)" : "var(--fg)";
+  $("#modeExpl").textContent = m[1];
+  $("#targetBadge").textContent = "target " + f.target + " %";
+  $("#dutyBadge").textContent = "duty " + f.pwmDuty + "/255";
+  $("#srcBadge").textContent = "source: " + f.source;
+  $("#ovExpiry").hidden = !f.manualExpiresSec;
+  if (f.manualExpiresSec) $("#ovExpiry").textContent = "Manual mode ends in " + dur(f.manualExpiresSec) + ", then the curve takes over again.";
+  /* --- temperatures --- */
+  $("#tSrc").textContent = t1(f.sourceTemp);
+  $("#tNoz").textContent = t1(t.nozzle); $("#tNozT").textContent = t.nozzleTarget ? " / " + Math.round(t.nozzleTarget) : "";
+  $("#tBed").textContent = t1(t.bed); $("#tBedT").textContent = t.bedTarget ? " / " + Math.round(t.bedTarget) : "";
+  $("#tCha").textContent = t1(t.chamber);
+  const fa = p.fans || {};
+  $("#fPart").textContent = (fa.part ?? "-") + " %"; $("#fAux").textContent = (fa.aux ?? "-") + " %";
+  $("#fCha").textContent = (fa.chamber ?? "-") + " %"; $("#fHb").textContent = (fa.heatbreak ?? "-") + " %";
+  /* --- job --- */
+  $("#stateBadge").textContent = p.state || "-";
+  $("#stateBadge").className = "badge " + (p.printing ? "ok" : "");
+  $("#jobName").textContent = p.task || "No active job";
+  /* the counters are null while the printer state is unknown */
+  $("#jobPct").textContent = p.progress == null ? "-" : p.progress + " %";
+  $("#jobBar").style.width = (p.progress ?? 0) + "%";
+  $("#jobStage").textContent = p.stageText || "-";
+  $("#jobRem").textContent = (p.remainingMin == null || !p.remainingMin) ? "-" : dur(p.remainingMin * 60);
+  $("#jobLayer").textContent = p.totalLayers == null ? "-" : (p.layer ?? "-") + " / " + p.totalLayers;
+  $("#jobDoor").textContent = p.doorOpen ? "open" : "closed";
+  $("#jobPwifi").textContent = p.wifiSignal || "-";
+  /* --- connection badges --- */
+  const wifiB = d.apMode
+    ? badge("warn", "The device runs its own access point because it is not connected to your WiFi. Set it up on the Network page.", "Access point mode")
+    : badge(w.connected ? "ok" : "err", w.connected ? "Connected to " + w.ssid + " at " + w.rssi + " dBm on channel " + w.channel + "." : "The device is not connected to WiFi.",
+      bars(w.rssi) + " " + (w.connected ? esc(w.ssid) + " " + w.rssi + " dBm" : "WiFi down"));
+  const prB = badge(p.connected ? (p.online ? "ok" : "warn") : "err",
+    "MQTT link to the printer: " + (p.mqttStateText || "-") + ", last report: " + seen(p.lastUpdateSec) + ".",
+    "Printer " + (p.connected ? (p.online ? "online" : "stale") : "offline"));
+  const mqB = st.mqttExt.enabled
+    ? badge(st.mqttExt.connected ? "ok" : "err", st.mqttExt.connected ? "Connected to your external MQTT broker." : "The external broker link is enabled but not connected - check host, port and credentials on the Integrations page.", "MQTT " + (st.mqttExt.connected ? "connected" : "down"))
+    : "";
+  $("#topbadges").innerHTML = wifiB + prB;
+  $("#connBadges").innerHTML = wifiB + prB + mqB;
+  $("#cIp").textContent = d.ip || "-"; $("#cHost").textContent = d.hostname || "-";
+  $("#cAge").textContent = !p.configured ? "printer not configured" : (p.lastUpdateSec == null ? "never" : p.lastUpdateSec + " s");
+  $("#cUp").textContent = dur(d.uptimeSec); $("#cHeap").textContent = Math.round(d.heapFree / 1024) + " KiB (min " + Math.round(d.heapMin / 1024) + ")";
+  $("#cFw").textContent = d.fw;
+  /* --- printer page --- */
+  $("#prBadge").textContent = p.connected ? (p.online ? "online" : "stale") : "offline";
+  $("#prBadge").className = "badge " + (p.connected ? (p.online ? "ok" : "warn") : "err");
+  $("#prState").textContent = (p.mqttStateText || "-") + " (" + p.mqttState + ")";
+  $("#prAge").textContent = p.configured ? seen(p.lastUpdateSec) : "-";
+  $("#prPState").textContent = p.state + (p.stageText ? " / " + p.stageText : "");
+  $("#prNoz").textContent = t1(t.nozzle) + " / " + (t.nozzleTarget ?? "-") + " °C";
+  $("#prBed").textContent = t1(t.bed) + " / " + (t.bedTarget ?? "-") + " °C";
+  $("#prCha").textContent = t1(t.chamber) + " °C";
+  $("#prErr").textContent = p.printError ? "0x" + Number(p.printError).toString(16) : "none";
+  /* --- network page --- */
+  $("#wfBadge").textContent = d.apMode ? "access point" : (w.connected ? "connected" : "disconnected");
+  $("#wfBadge").className = "badge " + (d.apMode ? "warn" : w.connected ? "ok" : "err");
+  $("#wfSsid").textContent = w.ssid || (d.apMode ? "BLSmartFlow-" + d.chipId : "-");
+  $("#wfIp").textContent = d.ip || "-";
+  $("#wfRssi").innerHTML = w.connected ? bars(w.rssi) + " " + w.rssi + " dBm" : "-";
+  $("#wfBss").textContent = w.bssid || "-"; $("#wfCh").textContent = w.channel || "-";
+  $("#wfMdns").textContent = "http://" + (d.hostname || "blsmartflow") + ".local/";
+  $("#apUrl").textContent = "http://" + (d.hostname || "blsmartflow") + ".local/";
+  $("#apBanner").hidden = !d.apMode;
+  /* --- integrations --- */
+  $("#mqBadge").textContent = !st.mqttExt.enabled ? "disabled" : st.mqttExt.connected ? "connected" : "not connected";
+  $("#mqBadge").className = "badge " + (!st.mqttExt.enabled ? "" : st.mqttExt.connected ? "ok" : "err");
+  renderTopics();
+  /* --- override slider follows the device unless the user is dragging --- */
+  const sl = $("#ovSpeed");
+  if (document.activeElement !== sl && !sl.dataset.hold) { sl.value = f.manualSpeed; $("#ovSpeedVal").textContent = f.manualSpeed + " %"; }
+  drawCurve();
+}
+
+/* --------------------------- curve ----------------------------- */
+/* Single source of truth for interpolation - used by the graph and the marker. */
+function interp(pts, temp) {
+  if (!pts.length) return 0;
+  if (temp <= pts[0].temp) return pts[0].speed;
+  if (temp >= pts[pts.length - 1].temp) return pts[pts.length - 1].speed;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (temp >= a.temp && temp <= b.temp) {
+      const span = b.temp - a.temp;
+      return span <= 0 ? b.speed : a.speed + (temp - a.temp) / span * (b.speed - a.speed);
+    }
+  }
+  return pts[pts.length - 1].speed;
+}
+const PRESETS = {
+  quiet: [{ temp: 0, speed: 0 }, { temp: 45, speed: 0 }, { temp: 200, speed: 25 }, { temp: 250, speed: 45 }, { temp: 300, speed: 70 }, { temp: 350, speed: 100 }],
+  balanced: [{ temp: 0, speed: 0 }, { temp: 50, speed: 0 }, { temp: 180, speed: 50 }, { temp: 245, speed: 80 }, { temp: 350, speed: 100 }],
+  aggressive: [{ temp: 0, speed: 0 }, { temp: 35, speed: 25 }, { temp: 120, speed: 60 }, { temp: 180, speed: 85 }, { temp: 220, speed: 100 }, { temp: 400, speed: 100 }],
+  chamber: [{ temp: 0, speed: 0 }, { temp: 30, speed: 0 }, { temp: 40, speed: 35 }, { temp: 50, speed: 60 }, { temp: 60, speed: 85 }, { temp: 80, speed: 100 }]
+};
+const cv = $("#curveCanvas"), cx = cv.getContext("2d");
+const PAD = { l: 38, r: 12, t: 12, b: 26 };
+let cvW = 600, cvH = 300, drag = -1;
+function axisMax() { return Math.max(S.range, Math.ceil(Math.max(...S.curve.map(p => p.temp), 0) / 10) * 10); }
+const t2x = t => PAD.l + t / axisMax() * (cvW - PAD.l - PAD.r);
+const s2y = s => cvH - PAD.b - s / 100 * (cvH - PAD.t - PAD.b);
+const x2t = x => clamp(Math.round((x - PAD.l) / (cvW - PAD.l - PAD.r) * axisMax()), 0, 400);
+const y2s = y => clamp(Math.round((cvH - PAD.b - y) / (cvH - PAD.t - PAD.b) * 100), 0, 100);
+function sizeCanvas() {
+  const w = cv.parentElement.clientWidth || 600;
+  cvW = w; cvH = clamp(Math.round(w * 0.52), 190, 330);
+  const dpr = Math.min(devicePixelRatio || 1, 3);
+  cv.width = Math.round(cvW * dpr); cv.height = Math.round(cvH * dpr);
+  cv.style.height = cvH + "px";
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawCurve();
+}
+function css(v) { return getComputedStyle(document.body).getPropertyValue(v).trim() || "#888"; }
+function drawCurve() {
+  if (!S.curve.length) { cx.clearRect(0, 0, cvW, cvH); return; }
+  const line = css("--line"), muted = css("--muted"), acc = css("--accent"), fg = css("--fg");
+  const max = axisMax(), step = max <= 100 ? 10 : 50;
+  cx.clearRect(0, 0, cvW, cvH);
+  cx.font = "11px system-ui,sans-serif"; cx.lineWidth = 1;
+  cx.strokeStyle = line; cx.fillStyle = muted; cx.textAlign = "center"; cx.textBaseline = "top";
+  for (let t = 0; t <= max; t += step) {
+    const x = t2x(t);
+    cx.beginPath(); cx.moveTo(x, PAD.t); cx.lineTo(x, cvH - PAD.b); cx.stroke();
+    if (t % (step * (max <= 100 ? 2 : 2)) === 0) cx.fillText(String(t), x, cvH - PAD.b + 5);
+  }
+  cx.textAlign = "right"; cx.textBaseline = "middle";
+  for (let s = 0; s <= 100; s += 20) {
+    const y = s2y(s);
+    cx.beginPath(); cx.moveTo(PAD.l, y); cx.lineTo(cvW - PAD.r, y); cx.stroke();
+    cx.fillText(s + "%", PAD.l - 6, y);
+  }
+  cx.textAlign = "right"; cx.textBaseline = "top";
+  cx.fillText("°C", cvW - PAD.r, PAD.t + 2);
+  /* curve */
+  const pts = S.curve;
+  cx.strokeStyle = acc; cx.lineWidth = 2.5; cx.lineJoin = "round"; cx.beginPath();
+  pts.forEach((p, i) => { const x = t2x(p.temp), y = s2y(p.speed); i ? cx.lineTo(x, y) : cx.moveTo(x, y); });
+  cx.stroke();
+  cx.lineTo(t2x(pts[pts.length - 1].temp), s2y(0)); cx.lineTo(t2x(pts[0].temp), s2y(0)); cx.closePath();
+  cx.globalAlpha = 0.12; cx.fillStyle = acc; cx.fill(); cx.globalAlpha = 1;
+  /* live marker */
+  const stemp = S.st && S.st.fan ? S.st.fan.sourceTemp : null;
+  if (stemp != null) {
+    const out = interp(pts, stemp), x = t2x(clamp(stemp, 0, max)), y = s2y(out);
+    cx.setLineDash([4, 4]); cx.strokeStyle = muted; cx.lineWidth = 1.5;
+    cx.beginPath(); cx.moveTo(x, cvH - PAD.b); cx.lineTo(x, y); cx.lineTo(PAD.l, y); cx.stroke();
+    cx.setLineDash([]);
+    cx.fillStyle = fg; cx.beginPath(); cx.arc(x, y, 4.5, 0, 7); cx.fill();
+    cx.textAlign = x > cvW - 100 ? "right" : "left"; cx.textBaseline = "bottom";
+    const ly = Math.max(y - 8, PAD.t + 12);          // keep the label inside the plot
+    cx.fillText((stemp > max ? "≥ " : "") + Math.round(stemp) + " °C → " + Math.round(out) + " %",
+      x + (x > cvW - 100 ? -8 : 8), ly);
+  }
+  /* points */
+  pts.forEach((p, i) => {
+    const x = t2x(p.temp), y = s2y(p.speed);
+    cx.beginPath(); cx.arc(x, y, i === S.sel ? 8 : 6, 0, 7);
+    cx.fillStyle = i === S.sel ? acc : css("--card"); cx.fill();
+    cx.lineWidth = 2.5; cx.strokeStyle = acc; cx.stroke();
+  });
+}
+function pointAt(x, y) { return S.curve.findIndex(p => Math.hypot(t2x(p.temp) - x, s2y(p.speed) - y) < 16); }
+function nearLine(x, y) { const t = x2t(x); return Math.abs(s2y(interp(S.curve, t)) - y) < 14; }
+function selectPoint(i) { S.sel = i; renderCurveTable(); drawCurve(); }
+function insertAt(temp) {
+  if (S.curve.length >= 16) { toast("A curve can have at most 16 points.", "warn"); return; }
+  const t = clamp(Math.round(temp), 0, 400);
+  const dup = S.curve.findIndex(p => p.temp === t);
+  if (dup >= 0) { selectPoint(dup); toast("There is already a point at " + t + " \u00b0C - drag it instead.", "warn"); return; }
+  const speed = Math.round(interp(S.curve, temp));
+  S.curve.push({ temp: t, speed });
+  S.curve.sort((a, b) => a.temp - b.temp);
+  selectPoint(S.curve.findIndex(p => p.temp === t));
+  updateSaveBar();
+}
+function deletePoint(i) {
+  if (S.curve.length <= 2) { toast("The curve needs at least 2 points.", "warn"); return; }
+  if (i < 0 || i >= S.curve.length) return;
+  S.curve.splice(i, 1); S.sel = Math.min(i, S.curve.length - 1);
+  renderCurveTable(); drawCurve(); updateSaveBar();
+}
+function movePoint(i, temp, speed) {
+  const lo = i > 0 ? S.curve[i - 1].temp + 1 : 0;
+  const hi = i < S.curve.length - 1 ? S.curve[i + 1].temp - 1 : 400;
+  S.curve[i] = { temp: clamp(Math.round(temp), Math.min(lo, hi), Math.max(lo, hi)), speed: clamp(Math.round(speed), 0, 100) };
+  updateSaveBar();
+}
+cv.addEventListener("pointerdown", e => {
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  const i = pointAt(x, y);
+  if (i >= 0) { drag = i; selectPoint(i); cv.setPointerCapture(e.pointerId); }
+  else if (nearLine(x, y)) insertAt(x2t(x));
+  else selectPoint(-1);
+});
+cv.addEventListener("pointermove", e => {
+  if (drag < 0) return;
+  const r = cv.getBoundingClientRect();
+  movePoint(drag, x2t(e.clientX - r.left), y2s(e.clientY - r.top));
+  renderCurveTable(); drawCurve();
+});
+["pointerup", "pointercancel"].forEach(ev => cv.addEventListener(ev, () => { drag = -1; }));
+document.addEventListener("keydown", e => {
+  if (S.page !== "curve" || S.sel < 0) return;
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+  if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); deletePoint(S.sel); }
+});
+function renderCurveTable() {
+  $("#cvRows").innerHTML = S.curve.map((p, i) =>
+    '<tr class="' + (i === S.sel ? "sel" : "") + '"><td>' + (i + 1) + '</td>' +
+    '<td><input type="number" min="0" max="400" step="1" value="' + p.temp + '" data-i="' + i + '" data-k="temp" aria-label="Point ' + (i + 1) + ' temperature in degrees Celsius" data-tip="Temperature of point ' + (i + 1) + ' (0-400 &deg;C). It cannot pass its neighbours."></td>' +
+    '<td><input type="number" min="0" max="100" step="1" value="' + p.speed + '" data-i="' + i + '" data-k="speed" aria-label="Point ' + (i + 1) + ' fan speed in percent" data-tip="Fan speed at that temperature (0-100 %)."></td>' +
+    '<td><button class="btn sm ghost" data-del="' + i + '" aria-label="Delete point ' + (i + 1) + '" data-tip="Remove this point from the curve."><svg aria-hidden="true"><use href="#i-trash"/></svg></button></td></tr>').join("");
+  $$("#cvRows input").forEach(inp => {
+    inp.addEventListener("focus", () => selectPoint(+inp.dataset.i));
+    inp.addEventListener("change", () => {
+      const i = +inp.dataset.i, p = S.curve[i];
+      movePoint(i, inp.dataset.k === "temp" ? num(inp.value, p.temp) : p.temp, inp.dataset.k === "speed" ? num(inp.value, p.speed) : p.speed);
+      renderCurveTable(); drawCurve();
+    });
+  });
+  $$("#cvRows [data-del]").forEach(b => b.addEventListener("click", () => deletePoint(+b.dataset.del)));
+}
+
+/* ------------------------ page wiring -------------------------- */
+function wirePages() {
+  /* dashboard: manual override */
+  const sl = $("#ovSpeed");
+  sl.addEventListener("input", () => { sl.dataset.hold = "1"; $("#ovSpeedVal").textContent = sl.value + " %"; });
+  sl.addEventListener("change", () => setTimeout(() => { delete sl.dataset.hold; }, 4000));
+  const fanCmd = async (body, ok) => { try { const r = await api("POST", "/api/fan", body); if (r.fan) renderStatus(Object.assign({}, S.st, { fan: r.fan })); toast(ok, "ok"); } catch (e) { fail(e); } };
+  $("#ovApply").addEventListener("click", () => fanCmd({ mode: "manual", speed: +sl.value, durationSec: +$("#ovDur").value },
+    "Manual mode at " + sl.value + " %" + (+$("#ovDur").value ? " for " + dur(+$("#ovDur").value) : "")));
+  $("#ovAuto").addEventListener("click", () => fanCmd({ mode: "auto" }, "Back to automatic curve control"));
+  $("#ovOff").addEventListener("click", () => fanCmd({ mode: "off" }, "Fan switched off"));
+
+  /* curve page */
+  $("#cvAdd").addEventListener("click", () => {
+    let gap = 0, at = 0;
+    for (let i = 0; i < S.curve.length - 1; i++) { const g = S.curve[i + 1].temp - S.curve[i].temp; if (g > gap) { gap = g; at = S.curve[i].temp + g / 2; } }
+    if (gap < 2) { toast("No room left between the existing points.", "warn"); return; }
+    insertAt(at); renderCurveTable(); drawCurve();
+  });
+  $("#cvDel").addEventListener("click", () => S.sel < 0 ? toast("Select a point first.", "warn") : deletePoint(S.sel));
+  $("#cvPreset").addEventListener("change", e => {
+    const p = PRESETS[e.target.value]; if (!p) return;
+    S.curve = JSON.parse(JSON.stringify(p)); S.sel = -1;
+    if (e.target.value === "chamber") setRange(100);
+    renderCurveTable(); drawCurve(); updateSaveBar(); e.target.value = "";
+    toast("Preset loaded - press Save to write it to the device.");
+  });
+  $("#rng100").addEventListener("click", () => setRange(100));
+  $("#rng400").addEventListener("click", () => setRange(400));
+
+  /* each card's Save button writes only its own section; the save bar writes everything */
+  ["prSave", "mqSave", "webSave", "diagSave"].forEach(id => {
+    const b = $("#" + id);
+    b.addEventListener("click", () => saveSection(b.dataset.section));
+  });
+  $("#saveBtn").addEventListener("click", saveAll);
+  $("#revertBtn").addEventListener("click", revertAll);
+
+  /* network - once the user touches this form, live config updates leave it alone */
+  $("#scanBtn").addEventListener("click", scan);
+  ["wf-ssid", "wf-pass", "wf-host"].forEach(id =>
+    $("#" + id).addEventListener("input", () => { S.wifiFormTouched = true; }));
+  $("#wf-lock").addEventListener("click", e => {
+    const b = e.currentTarget, v = b.getAttribute("aria-checked") !== "true";
+    b.setAttribute("aria-checked", v ? "true" : "false");
+    S.wifiFormTouched = true;
+  });
+  $("#wfSave").addEventListener("click", saveWifi);
+
+  /* system */
+  $("#infoRefresh").addEventListener("click", loadInfo);
+  $("#otaBtn").addEventListener("click", uploadFirmware);
+  $("#restoreBtn").addEventListener("click", restoreBackup);
+  $("#restartBtn").addEventListener("click", async () => {
+    try { await api("POST", "/api/restart"); toast("Restarting - the page reconnects automatically in a few seconds.", "ok"); } catch (e) { fail(e); }
+  });
+  $("#frText").addEventListener("input", e => { $("#frBtn").disabled = e.target.value !== "RESET"; });
+  $("#frBtn").addEventListener("click", async () => {
+    try { await api("POST", "/api/factoryreset", { confirm: true }); toast("Factory reset done - the device restarts into access point mode.", "warn"); $("#frText").value = ""; $("#frBtn").disabled = true; } catch (e) { fail(e); }
+  });
+  $("#logPause").addEventListener("click", e => {
+    S.logPaused = !S.logPaused;
+    e.currentTarget.setAttribute("aria-pressed", S.logPaused ? "true" : "false");
+    e.currentTarget.textContent = S.logPaused ? "Resume" : "Pause";
+  });
+  $("#logClear").addEventListener("click", () => { $("#logbox").textContent = ""; });
+}
+function setRange(r) {
+  S.range = r;
+  $("#rng100").setAttribute("aria-pressed", r === 100 ? "true" : "false");
+  $("#rng400").setAttribute("aria-pressed", r === 400 ? "true" : "false");
+  drawCurve();
+}
+
+/* WiFi scan + save (POST /api/wifi, always needs a restart) */
+async function scan() {
+  const btn = $("#scanBtn"); btn.disabled = true;
+  $("#scanHint").hidden = false; $("#scanHint").textContent = "Scanning for networks...";
+  const started = Date.now();
+  /* an explicit click always discards the cached result (202) and starts a new scan;
+     the follow-up polls must not force again or the scan restarts forever */
+  let force = true;
+  const poll = async () => {
+    try {
+      const url = "/api/wifi/scan" + (force ? "?force=1" : "");
+      force = false;
+      const r = await api("GET", url);
+      if (r && r.scanning) {
+        if (Date.now() - started > 15000) throw new Error("The scan did not finish in time.");
+        return setTimeout(poll, 900);
+      }
+      showNetworks((r && r.networks) || []);
+    } catch (e) { fail(e); $("#scanHint").hidden = true; btn.disabled = false; }
+  };
+  poll();
+}
+function showNetworks(nets) {
+  $("#scanHint").hidden = true; $("#scanBtn").disabled = false;
+  const ul = $("#netList"); ul.hidden = false;
+  if (!nets.length) { ul.innerHTML = '<li><button type="button" disabled>No 2.4 GHz networks found</button></li>'; return; }
+  ul.innerHTML = nets.map(n =>
+    '<li><button type="button" data-ssid="' + esc(n.ssid) + '" data-tip="Signal ' + n.rssi + ' dBm on channel ' + n.channel + (n.secure ? ", password protected" : ", open network") + '. Click to use this network.">' +
+    bars(n.rssi) + '<span class="ss">' + esc(n.ssid || "(hidden)") + "</span>" +
+    (n.secure ? '<svg width="15" height="15" aria-hidden="true"><use href="#i-lock"/></svg>' : "") +
+    '<span class="meta">ch ' + n.channel + " · " + n.rssi + " dBm</span></button></li>").join("");
+  $$("#netList button[data-ssid]").forEach(b => b.addEventListener("click", () => {
+    S.wifiFormTouched = true;
+    $("#wf-ssid").value = b.dataset.ssid;
+    const n = nets.find(x => x.ssid === b.dataset.ssid);
+    if (n) $("#wf-bssid").textContent = "BSSID: " + n.bssid;
+    $("#wf-pass").focus();
+  }));
+}
+async function saveWifi() {
+  const ssid = $("#wf-ssid").value.trim();
+  if (!ssid) { toast("Enter a network name first.", "err"); $("#wf-ssid").focus(); return; }
+  const body = { ssid, hostname: $("#wf-host").value.trim() || "blsmartflow", lockBssid: $("#wf-lock").getAttribute("aria-checked") === "true" };
+  const pw = $("#wf-pass").value;
+  if (S.wifiPassTouched && pw !== MASK) body.password = pw;
+  const bss = ($("#wf-bssid").textContent.split(": ")[1] || "").trim();
+  if (bss && bss !== "not set") body.bssid = bss;
+  try {
+    await api("POST", "/api/wifi", body);
+    S.wifiFormTouched = false;
+    toast("WiFi settings saved - the device is restarting.", "ok");
+    if (S.st && S.st.device.apMode) { $("#apDone").hidden = false; $("#apBanner").hidden = true; }
+  } catch (e) { fail(e); }
+}
+
+/* system page */
+async function loadInfo() {
+  try {
+    const i = await api("GET", "/api/info");
+    const rows = [["Firmware", i.fw], ["Build", i.build], ["Chip ID", i.chipId], ["ESP-IDF", i.sdk],
+    ["Flash size", Math.round(i.flashSize / 1048576) + " MB"], ["Sketch size", Math.round(i.sketchSize / 1024) + " KiB"],
+    ["Free OTA space", Math.round(i.freeSketchSpace / 1024) + " KiB"], ["Partition", i.partition], ["Last reset", i.resetReason]];
+    $("#infoKv").innerHTML = rows.map(r => "<dt>" + esc(r[0]) + "</dt><dd>" + esc(r[1] == null ? "-" : r[1]) + "</dd>").join("");
+  } catch (e) { fail(e); }
+}
+function uploadFirmware() {
+  const f = $("#otaFile").files[0];
+  if (!f) { toast("Choose a firmware .bin file first.", "err"); return; }
+  const fd = new FormData(); fd.append("firmware", f, f.name);
+  const xhr = new XMLHttpRequest();
+  $("#otaProgWrap").hidden = false; $("#otaBtn").disabled = true;
+  $("#otaMsg").textContent = "Uploading " + f.name + " (" + Math.round(f.size / 1024) + " KiB)...";
+  xhr.upload.onprogress = e => { if (e.lengthComputable) $("#otaProg").style.width = Math.round(e.loaded / e.total * 100) + "%"; };
+  xhr.onload = () => {
+    $("#otaBtn").disabled = false;
+    let d = null; try { d = JSON.parse(xhr.responseText); } catch (e) { }
+    if (xhr.status >= 200 && xhr.status < 300 && (!d || !d.error)) {
+      $("#otaProg").style.width = "100%";
+      $("#otaMsg").textContent = "Upload complete - the device is flashing and will restart. Do not power it off.";
+      toast("Firmware uploaded", "ok");
+    } else {
+      const m = (d && d.error) || ("HTTP " + xhr.status);
+      $("#otaMsg").textContent = "Update failed: " + m;
+      toast("Update failed: " + m, "err");
+    }
+  };
+  xhr.onerror = () => { $("#otaBtn").disabled = false; $("#otaMsg").textContent = "Update failed: the connection was lost."; toast("Update failed: connection lost", "err"); };
+  xhr.open("POST", "/api/update"); xhr.send(fd);
+}
+async function restoreBackup() {
+  const f = $("#restoreFile").files[0];
+  if (!f) { toast("Choose a backup file first.", "err"); return; }
+  try {
+    const cfg = JSON.parse(await f.text());
+    await api("POST", "/api/restore", cfg);
+    toast("Configuration restored - the device is restarting.", "ok");
+  } catch (e) { fail(e.name === "SyntaxError" ? new Error("That file is not valid JSON.") : e); }
+}
+
+/* reference tables (Integrations) */
+function copyBtn(text) {
+  return '<button class="btn sm ghost" data-copy="' + esc(text) + '" aria-label="Copy ' + esc(text) + '" data-tip="Copy this topic to the clipboard."><svg aria-hidden="true"><use href="#i-copy"/></svg></button>';
+}
+function renderTopics() {
+  const base = (S.cfg && S.cfg.mqtt.baseTopic) || ("blsmartflow/" + (S.st ? S.st.device.chipId : "<chipid>"));
+  if (base === S.topicBase) return;            // only rebuild when the base topic changes
+  S.topicBase = base;
+  const rows = [["availability", "pub", "online / offline (retained LWT)"], ["state", "pub", "full status JSON, every publish interval"],
+  ["fan/speed", "pub", "0-100 (current output)"], ["fan/on_state", "pub", "ON when the output is above 0"],
+  ["mode", "pub", "auto / manual / off"], ["fan/set", "sub", "0-100 → manual mode at that speed"],
+  ["fan/on", "sub", "ON → manual, OFF → mode off"], ["mode/set", "sub", "auto / manual / off"],
+  ["curve/set", "sub", '{"points":[{"temp":0,"speed":0},…]}'], ["restart", "sub", "any payload → reboot"]];
+  $("#topicRows").innerHTML = rows.map(r => '<tr><td class="mono nowrap">' + esc(base + "/" + r[0]) + "</td><td>" + r[1] + "</td><td>" + esc(r[2]) + "</td><td>" + copyBtn(base + "/" + r[0]) + "</td></tr>").join("");
+  $$("#topicRows [data-copy]").forEach(b => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied " + b.dataset.copy, "ok"); }
+    catch (e) { toast("The browser blocked clipboard access - copy it by hand.", "warn"); }
+  }));
+}
+function renderApiTable() {
+  const h = location.origin && location.origin !== "null" ? location.origin : "http://blsmartflow.local";
+  const rows = [
+    ["GET", "/api/status", "Everything the dashboard shows, as one JSON object.", "curl " + h + "/api/status"],
+    ["GET", "/api/events", "Server-sent events: a status object every second plus log lines.", "curl -N " + h + "/api/events"],
+    ["GET", "/api/config", "Full configuration, secrets replaced by asterisks.", "curl " + h + "/api/config"],
+    ["POST", "/api/config", "Deep-merge a partial config; returns restartRequired.", "curl -X POST -d '{\"fan\":{\"minSpeed\":20}}' " + h + "/api/config"],
+    ["GET", "/api/curve", "The stored curve points and the source temperature.", "curl " + h + "/api/curve"],
+    ["PUT", "/api/curve", "Replace the curve (2-16 points, 0-400 °C, 0-100 %).", "curl -X PUT -d '{\"points\":[{\"temp\":0,\"speed\":0},{\"temp\":250,\"speed\":100}]}' " + h + "/api/curve"],
+    ["POST", "/api/fan", "Set mode/speed, optionally for a limited time.", "curl -X POST -d '{\"mode\":\"manual\",\"speed\":60,\"durationSec\":600}' " + h + "/api/fan"],
+    ["GET", "/api/wifi/scan", "202 while scanning, then the cached network list; ?force=1 starts a new scan.", "curl " + h + "/api/wifi/scan?force=1"],
+    ["POST", "/api/wifi", "Store WiFi credentials (always needs a restart).", "curl -X POST -d '{\"ssid\":\"Home\",\"password\":\"secret\"}' " + h + "/api/wifi"],
+    ["GET", "/api/log", "The last 64 log lines.", "curl " + h + "/api/log"],
+    ["GET", "/api/info", "Firmware, chip, flash and partition details.", "curl " + h + "/api/info"],
+    ["GET", "/api/backup", "Download the config including secrets.", "curl -OJ " + h + "/api/backup"],
+    ["POST", "/api/restore", "Upload a backup and restart.", "curl -X POST --data-binary @backup.json " + h + "/api/restore"],
+    ["POST", "/api/update", "OTA firmware upload (multipart field 'firmware').", "curl -F firmware=@firmware.bin " + h + "/api/update"],
+    ["POST", "/api/restart", "Reboot the device.", "curl -X POST " + h + "/api/restart"],
+    ["POST", "/api/factoryreset", "Erase the configuration and restart into AP mode.", "curl -X POST -d '{\"confirm\":true}' " + h + "/api/factoryreset"]];
+  $("#apiRows").innerHTML = rows.map(r => "<tr><td><b>" + r[0] + '</b></td><td class="mono nowrap">' + r[1] + "</td><td>" + esc(r[2]) + '</td><td><code class="blk">' + esc(r[3]) + "</code></td></tr>").join("");
+}
+
+/* ----------------------------- log ----------------------------- */
+function addLog(line) {
+  if (S.logPaused) return;
+  const box = $("#logbox"), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+  const d = document.createElement("div");
+  d.className = /\[E\]|ERROR/.test(line) ? "e" : /\[W\]|WARN/.test(line) ? "w" : "";
+  d.textContent = line; box.appendChild(d);
+  while (box.children.length > 400) box.firstChild.remove();
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+
+/* --------------------------- live feed ------------------------- */
+let es = null, sseFails = 0, pollTimer = null;
+function connBanner(lost) {
+  const b = $("#connbanner");
+  if (!lost) { b.innerHTML = ""; return; }
+  if (!b.innerHTML) b.innerHTML = '<div class="banner err"><svg aria-hidden="true"><use href="#i-alert"/></svg><span><b>No connection to the device.</b>The page keeps retrying. If it does not come back, check that the device is powered and on the network.</span></div>';
+}
+function startLive() {
+  /* ?poll=1 forces the polling fallback - handy when a proxy or browser breaks SSE */
+  if (!window.EventSource || /[?&]poll=1/.test(location.search)) return startPolling();
+  try { es = new EventSource("/api/events"); } catch (e) { return startPolling(); }
+  es.addEventListener("status", e => { try { renderStatus(JSON.parse(e.data)); sseFails = 0; } catch (err) { } });
+  es.addEventListener("log", e => addLog(e.data));
+  es.onopen = () => { sseFails = 0; if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
+  es.onerror = () => {
+    es.close(); sseFails++;
+    if (sseFails >= 2) { toast("Live event stream unavailable - falling back to polling.", "warn"); startPolling(); }
+    else setTimeout(startLive, 2000);
+  };
+}
+function startPolling() {
+  if (pollTimer) return;
+  const tick = async () => { try { renderStatus(await api("GET", "/api/status")); } catch (e) { connBanner(true); } };
+  tick(); pollTimer = setInterval(tick, 2000);
+}
+setInterval(() => { if (S.lastStatus && Date.now() - S.lastStatus > 6000) connBanner(true); }, 2000);
+
+/* ----------------------------- init ---------------------------- */
+async function init() {
+  buildNav(); wireControls(); wirePages(); renderApiTable();
+  new ResizeObserver(sizeCanvas).observe(cv.parentElement);
+  try {
+    const [cfg, st] = await Promise.all([api("GET", "/api/config"), api("GET", "/api/status")]);
+    S.cfg = cfg; S.curve = JSON.parse(JSON.stringify(cfg.fan.curve || []));
+    applyConfig(cfg); renderStatus(st);
+    setRange(Math.max(...S.curve.map(p => p.temp)) <= 100 ? 100 : 400);
+    renderCurveTable(); sizeCanvas();
+    const hash = location.hash.slice(1);
+    go(st.device.apMode ? "network" : (PAGES.some(p => p[0] === hash) ? hash : "dashboard"));
+  } catch (e) {
+    fail(e); connBanner(true); go("dashboard"); sizeCanvas();
+  }
+  try { const l = await api("GET", "/api/log"); (l.lines || []).forEach(addLog); } catch (e) { }
+  loadInfo(); startLive();
+}
+init();
+</script>
+</body>
+</html>
