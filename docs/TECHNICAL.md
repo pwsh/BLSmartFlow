@@ -606,6 +606,9 @@ the printer still sat at `FINISH`. A manual session records `manual = true` and 
 3. Send when the requested value **changed**, or when 30 s have passed since the last send — the
    printer resets its fans on its own schedule, so a command that is never repeated quietly stops
    being true.
+4. Unless the printer is **refusing** the command (`CooldownInputs.commandRejected`, 2.0.4). Both the
+   change and the 30 s re-assert are then suppressed until `COOLDOWN_REJECT_RETRY_MS` (5 minutes)
+   has passed since the last send. Not zero: Developer Mode can be switched on mid-session.
 
 **Stop**, in this order of urgency:
 
@@ -658,6 +661,43 @@ S255` (newlines flattened to spaces so one command is one log line).
 Both fans go out in a single `param`: the printer applies a `gcode_line` as a unit, and sending them
 separately would leave a window with the aux fan running and the chamber fan not.
 
+### Command acknowledgements and Developer Mode (2.0.4)
+
+A Bambu printer with **Developer Mode** switched off still publishes its reports — reads are
+unaffected — but signature-checks every *write* and answers the request on
+`device/<serial>/report` with:
+
+```jsonc
+{"print":{"command":"gcode_line","result":"failed","reason":"mqtt message verify failed",
+          "err_code":84033543,"param":"M106 P3 S255\n","sequence_id":"5002"}}
+```
+
+Before 2.0.4 every `gcode_line` message was dropped as noise (`isIgnoredCommand`), so the refusal was
+invisible: the session went on believing the fans were running. The path now is:
+
+1. `parseGcodeAck()` (`printer_parse.h`) reads `{sequence_id, result, reason, err_code}` out of the
+   filtered document. It is a **pure** reader — it does not touch `PrinterReport`, because only
+   `printer_link.cpp` knows which ids are ours. `result` is matched case-insensitively (`SUCCESS` on
+   an X1C, `success` on some P-series builds).
+2. `printer_link.cpp` publishes with `sequence_id` starting at **5000** and keeps a ring of the
+   **last four ids** it sent (`isOurSequenceId()`). Bambu Studio acknowledges its own `gcode_line`
+   requests on the same topic with much lower ids; those are ignored exactly as before.
+3. For an ack that *is* ours, `applyGcodeAck()` records `lastGcodeResult` / `lastGcodeReason[48]` /
+   `lastGcodeErr` / `lastGcodeMs` in the `PrinterReport` (POD, bounded copies — the whole struct is
+   still memcpy'd under a spinlock). A **success clears the reason**, so the state is self-healing.
+4. `cooldown.cpp` compares `lastGcodeMs` against the ack it last handled. A failure sets
+   `printerFans.error = "rejected: <reason>"`, forces `printerFans.sent = false`, logs
+   `cooldown: printer rejected M106 (…) - enable Developer Mode on the printer` **once per session**,
+   and feeds `commandRejected` into the state machine so the re-assert drops to once per 5 minutes.
+
+Surfaces: `cooldown.printerFans.error` (string or `null`) and `printer.lastCommandError` (string or
+`null`, cleared on the next accepted command). The Home Assistant *Cool-down result* sensor carries
+the same text as an `error` attribute. The web UI turns it into a red banner on both the dashboard
+cool-down line and the Post-print cool-down card.
+
+The report filter therefore also keeps `print.{sequence_id, result, reason, err_code}`. None of the
+four appears in a `push_status` report, so no state parsing changed.
+
 ### Concurrency
 
 The state machine has one owner at a time. Normally that is the loop task; `POST /api/cooldown` runs
@@ -683,7 +723,9 @@ The published status snapshot is a POD copied under a `portMUX`, like `PrinterSt
   (they push complete reports themselves).
 * **Outgoing G-code** (2.0.3): `printerLinkSendGcode()` queues a line into a 4 × 96-byte spinlock-
   guarded ring; the task publishes one per pass as a `gcode_line` request with an incrementing
-  `sequence_id`. See [Post-print cool-down](#post-print-cool-down).
+  `sequence_id` **starting at 5000** (2.0.4), and remembers the last four ids so the printer's
+  acknowledgement can be told apart from Bambu Studio's. See
+  [Post-print cool-down](#post-print-cool-down).
 * `printerLinkReconfigure()` tears the session down **only** when `ip`, `accessCode` or `serial`
   changed; `staleSec` and `debug.mqttDump` are picked up in place, so toggling a debug switch does
   not drop the link.
@@ -695,7 +737,7 @@ The published status snapshot is a POD copied under a `portMUX`, like `PrinterSt
 `print.{command, nozzle_temper, nozzle_target_temper, bed_temper, bed_target_temper, chamber_temper,
 cooling_fan_speed, big_fan1_speed, big_fan2_speed, heatbreak_fan_speed, fan_gear, gcode_state,
 mc_percent, mc_remaining_time, layer_num, total_layer_num, subtask_name, stg_cur, print_error,
-wifi_signal, home_flag, lights_report, info.temp}` plus
+wifi_signal, home_flag, lights_report, info.temp, sequence_id, result, reason, err_code}` plus
 `print.device.{extruder, bed, ctc, airduct}`.
 
 Messages whose `print.command` is one of `gcode_line, project_prepare, project_file,
@@ -963,13 +1005,13 @@ retained to `<base>/state`.
                "stage":0, "stageText":"printing", "progress":42, "remainingMin":87,
                "layer":12, "totalLayers":210, "task":"Benchy.3mf", "phase":"printing",
                "doorOpen":false, "doorEdgeCount":2,
-               "printError":0, "wifiSignal":"-45dBm",
+               "printError":0, "wifiSignal":"-45dBm", "lastCommandError":null,
                "temps": { "nozzle":220.4, "nozzleTarget":220, "bed":60.1, "bedTarget":60,
                           "chamber":38.0, "chamberTarget":45.0 },
                "fans":  { "part":100, "aux":0, "chamber":40, "heatbreak":100 } },
   "cooldown":{ "active":true, "reason":null, "target":35, "chamber":41.2, "startChamber":52.0,
                "elapsedSec":120, "maxSec":1800,
-               "printerFans": { "aux":100, "chamber":100, "sent":true },
+               "printerFans": { "aux":100, "chamber":100, "sent":true, "error":null },
                "ownFan":"thermostat", "material":"abs" },
   "fan":     { "output":55, "target":55, "mode":"auto", "effectiveMode":"auto", "source":"nozzle",
                "sourceTemp":220.4, "setpoint":null, "chamberTarget":45, "cooldownTarget":35,
@@ -1007,6 +1049,8 @@ retained to `<base>/state`.
 | `printer.doorOpen` | Front-door switch — `true`/`false`, or **`null`** while `doorKnown` is false. The top lid has no sensor |
 | `printer.doorKnown` | An open/close edge has been observed, so the bit can be trusted. Everything door-driven is inert until then |
 | `printer.doorEdgeCount` | Transitions seen since boot; the first report is state, not an edge |
+| `printer.lastCommandError` | The printer's `reason` for refusing the last command **we** sent, or `null`. `"mqtt message verify failed"` means Developer Mode is off on the printer. Cleared by the next accepted command (see [Command acknowledgements](#command-acknowledgements-and-developer-mode-204)) |
+| `cooldown.printerFans.error` | `"rejected: <reason>"` while the printer is refusing the `M106`, else `null`. `printerFans.sent` is forced to `false` for as long as it is set |
 | `printer.temps.chamberTarget` | The printer's own chamber set point, `null` on machines without a chamber heater |
 | `fan.output` / `target` | Rounded percent actually driven / requested by the active mode |
 | `fan.effectiveMode` | `off｜manual｜stale｜door｜preheat｜idle｜cooldown｜chamber｜auto`. `cooldown` covers both the `onlyWhilePrinting` cool-down window and a post-print cool-down session |

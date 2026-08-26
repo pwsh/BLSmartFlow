@@ -10,7 +10,11 @@ while printing, then sanitised (job/network identifiers removed). Use them to te
   `print.device.bed.info.temp` / `print.device.extruder.info[0].temp` (low 16 bits = current °C, high 16 bits = target).
   Fan speeds are strings on a 0–15 scale (`big_fan1_speed: "6"` = aux fan 40 %).
 * `x1c_gcode_line.json` — a `print.command == "gcode_line"` acknowledgement; these arrive several times a
-  minute and must be ignored by the parser.
+  minute and must be ignored by the parser. Bambu Studio's own commands are acknowledged here too, which is
+  why an ack only counts as ours when its `sequence_id` is one the firmware published (ids from 5000 up).
+* `x1c_gcode_line_rejected.json` — the same acknowledgement from a printer with **Developer Mode off**:
+  `result: "failed"`, `reason: "mqtt message verify failed"`, `err_code: 84033543`. Reports keep flowing; only
+  write commands are signature-checked, so this is the single piece of evidence that an `M106` was refused.
 * `x1c_ams_trays.json` — the `ams` block and `vt_tray` from the same X1C while printing from AMS slot 0
   (`ams.tray_now = "0"`): ABS `GFB00`, PLA `GFA00`, PLA-AERO `GFA11`, PLA `GFA05`, external spool ASA `GFB01`.
   `tray_now` encoding: `ams_index*4 + slot`; `254` = external spool (`vt_tray`); `255` = none.

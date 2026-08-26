@@ -36,12 +36,29 @@ a{color:var(--accent)}
 /* ---------- shell ---------- */
 #app{min-height:100vh;display:grid;grid-template-columns:1fr;grid-template-rows:auto 1fr}
 #side{display:none}
+/* The header must never set the page's minimum width: brand + badges + theme
+   button laid out on one unbreakable line came to ~429 px, which widened the
+   layout viewport on a 390 px phone and clipped every card. Everything in here
+   is therefore allowed to shrink, and below 430 px the badges take their own
+   row underneath the brand. */
 #top{grid-column:1/-1;position:sticky;top:0;z-index:30;display:flex;gap:10px;align-items:center;
+  flex-wrap:wrap;row-gap:8px;
   padding:10px 14px;background:var(--card);border-bottom:1px solid var(--line)}
-#top .brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:.2px}
+#top .brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:.2px;
+  min-width:0;flex:0 1 auto;white-space:nowrap}
 #top .brand svg{width:26px;height:26px;flex:none}
-#top .grow{flex:1}
-#topbadges{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+#top .grow{flex:1 1 0;min-width:0}
+#topbadges{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;min-width:0;flex:0 1 auto}
+/* A badge may give up the width of its label (a long SSID) rather than the
+   width of the page; .t is the part that is allowed to end in an ellipsis. */
+#topbadges .badge{min-width:0;max-width:100%}
+.badge .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+@media (max-width:430px){
+  #top{padding:10px 12px;gap:8px}
+  #top .brand{flex:1 1 auto}      /* pushes the theme button to the right edge */
+  #top .grow{display:none}
+  #topbadges{order:3;flex-basis:100%;justify-content:flex-start}
+}
 main{padding:14px 14px calc(72px + env(safe-area-inset-bottom));max-width:1400px;width:100%;margin:0 auto}
 section[hidden]{display:none}
 .page-h{margin:2px 0 14px}
@@ -75,8 +92,11 @@ section[hidden]{display:none}
 .grid.wide{grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:14px;min-width:0}
 .card.span2{grid-column:1/-1}
-.card>header{display:flex;align-items:center;gap:8px;margin:-2px 0 10px}
-.card>header h3{font-size:15px}
+/* Wrapping, for the same reason as #top: the Print job card carries four
+   nowrap badges beside its title, and on a narrow screen they used to hang off
+   the right-hand edge of the card instead of moving to a second line. */
+.card>header{display:flex;align-items:center;gap:8px;row-gap:6px;flex-wrap:wrap;margin:-2px 0 10px}
+.card>header h3{font-size:15px;min-width:0}
 .card>header .grow{flex:1}
 .hint{color:var(--muted);font-size:12.5px;margin:0 0 10px}
 
@@ -288,6 +308,7 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
         </div>
       </div>
       <div id="cdDash" hidden style="margin-top:12px;border-top:1px solid var(--line);padding-top:11px">
+        <div class="banner err" id="cdDashReject" hidden style="margin:0 0 10px"><svg aria-hidden="true"><use href="#i-alert"/></svg><span><b id="cdDashRejectHead">The printer rejected the fan command.</b>Enable Developer Mode on the printer: <b>Settings &rarr; Network &rarr; Developer Mode</b> (LAN Only Mode must be on). Reports still work without it - only commands are refused.</span></div>
         <div class="row" style="justify-content:space-between;gap:8px;flex-wrap:nowrap;align-items:center">
           <b id="cdDashText" style="font-size:13px;overflow-wrap:anywhere" data-tip="The post-print cool-down running now: where the chamber started, where it is going, and how long is left before the session gives up.">Cooling</b>
           <button class="btn sm" type="button" id="cdDashStop" data-tip="End the cool-down session now. If the printer's own fans were turned on, they are switched off again.">Stop</button>
@@ -468,14 +489,15 @@ code.blk{display:block;background:var(--card2);border:1px solid var(--line);bord
         <span class="txt" id="cd-gentle-l">Gentle cool-down for sensitive materials<small>ABS, ASA and PC wait until the chamber is 10 &deg;C below the print target, then run at half speed.</small></span></div>
 
       <div class="banner warn" style="margin:13px 0 0" id="cdWarn"><svg aria-hidden="true"><use href="#i-alert"/></svg><span><b>The next setting sends commands to your printer.</b>With it on, this device publishes <code>M106</code> G-code to the printer over MQTT to run its auxiliary and chamber fans. It is the only feature that commands the printer rather than just reading from it, which is why it is <i>off by default</i>. Commands are only ever sent while the printer reports <code>FINISH</code> or <code>IDLE</code>; if a print starts, the session ends at once and sends nothing, so it can never fight a running print for the fans.</span></div>
-      <div class="sw" style="margin-top:12px"><button type="button" role="switch" aria-checked="false" id="cd-fans" data-path="cooldown.usePrinterFans" aria-labelledby="cd-fans-l" data-tip="Send M106 P2 (auxiliary fan) and M106 P3 (chamber fan) to the printer while a cool-down session runs, and M106 ... S0 when it ends. Off by default: this is the only setting that makes the device command the printer. The commands are re-sent every 30 seconds because the printer may reset its fans on its own, and never leave the device unless the printer reports FINISH or IDLE."></button>
-        <span class="txt" id="cd-fans-l">Use the printer&apos;s own fans<small>Sends M106 to the printer. Off by default - see the warning above.</small></span></div>
+      <div class="sw" style="margin-top:12px"><button type="button" role="switch" aria-checked="false" id="cd-fans" data-path="cooldown.usePrinterFans" aria-labelledby="cd-fans-l" data-tip="Send M106 P2 (auxiliary fan) and M106 P3 (chamber fan) to the printer while a cool-down session runs, and M106 ... S0 when it ends. Off by default: this is the only setting that makes the device command the printer. Requires Developer Mode on the printer (Settings - Network - Developer Mode, with LAN Only Mode on): without it the printer still reports normally but refuses every command with 'mqtt message verify failed'. The commands are re-sent every 30 seconds because the printer may reset its fans on its own, and never leave the device unless the printer reports FINISH or IDLE."></button>
+        <span class="txt" id="cd-fans-l">Use the printer&apos;s own fans<small>Sends M106 to the printer. Off by default - see the warning above. Needs Developer Mode on the printer.</small></span></div>
       <div class="row" style="margin-top:11px">
         <div class="field"><label for="cd-aux">Auxiliary fan <span class="unit">%</span> <button class="qm" type="button" data-tip="Speed for the printer's auxiliary part-cooling fan (M106 P2) while the session runs. On an X1C this is the big fan on the left-hand wall; it moves the most air of the three. Range 0-100 %.">?</button></label>
           <input type="number" id="cd-aux" data-path="cooldown.auxSpeed" min="0" max="100" step="1" data-tip="Speed sent as M106 P2 during a cool-down session. Range 0-100 %."></div>
         <div class="field"><label for="cd-chfan">Chamber fan <span class="unit">%</span> <button class="qm" type="button" data-tip="Speed for the printer's chamber/exhaust fan (M106 P3) while the session runs. This is the one that pushes air out through the filter, so it is what actually empties the chamber rather than just stirring it. Range 0-100 %.">?</button></label>
           <input type="number" id="cd-chfan" data-path="cooldown.chamberFanSpeed" min="0" max="100" step="1" data-tip="Speed sent as M106 P3 during a cool-down session. Range 0-100 %."></div>
       </div>
+      <div class="banner err" id="cdReject" hidden style="margin:13px 0 0"><svg aria-hidden="true"><use href="#i-alert"/></svg><span><b id="cdRejectHead">The printer rejected the fan command.</b>Enable Developer Mode on the printer: <b>Settings &rarr; Network &rarr; Developer Mode</b> (LAN Only Mode must be on). Reports still work without it - only commands are signature-checked, which is why the rest of this page keeps updating. The session stops re-sending the command and retries once every five minutes.</span></div>
       <dl class="kv" style="margin-top:12px">
         <dt data-tip="How long the current session has been running, and the limit it stops at.">Session</dt><dd id="cdSession">not running</dd>
         <dt data-tip="Whether the printer's own fans are being driven right now, and at what speeds. 'Not sent' means either the option is off, the material's gentle rule is still holding them back, or the printer is not in a state where a command may be sent.">Printer fans</dt><dd id="cdFans">-</dd>
@@ -1223,7 +1245,8 @@ function renderStatus(st) {
   const wifiB = d.apMode
     ? badge("warn", "The device runs its own access point because it is not connected to your WiFi. Set it up on the Network page.", "Access point mode")
     : badge(w.connected ? "ok" : "err", w.connected ? "Connected to " + w.ssid + " at " + w.rssi + " dBm on channel " + w.channel + "." : "The device is not connected to WiFi.",
-      bars(w.rssi) + " " + (w.connected ? esc(w.ssid) + " " + w.rssi + " dBm" : "WiFi down"));
+      bars(w.rssi) + ' <span class="t">' +
+      (w.connected ? esc(w.ssid) + " " + w.rssi + " dBm" : "WiFi down") + "</span>");
   const prB = badge(p.connected ? (p.online ? "ok" : "warn") : "err",
     "MQTT link to the printer: " + (p.mqttStateText || "-") + ", last report: " + seen(p.lastUpdateSec) + ".",
     "Printer " + (p.connected ? (p.online ? "online" : "stale") : "offline"));
@@ -1327,11 +1350,25 @@ function renderCooldown(st) {
       (cd.startChamber != null ? " (started at " + t1(cd.startChamber) + " \u00b0C)" : "")
     : "not running";
   const pf = cd.printerFans || {};
-  $("#cdFans").textContent = pf.sent
-    ? "running - auxiliary " + pf.aux + " %, chamber " + pf.chamber + " %"
-    : (S.cfg && S.cfg.cooldown && S.cfg.cooldown.usePrinterFans
-      ? (active ? "not sent yet" : "allowed, but no session is running")
-      : "not used");
+  /* A printer with Developer Mode off answers our M106 with
+     "mqtt message verify failed" - the one failure the rest of the UI cannot
+     show, because reports keep arriving exactly as before. */
+  const rejected = !!pf.error;
+  const why = rejected ? String(pf.error).replace(/^rejected:\s*/, "") : "";
+  const head = "The printer rejected the fan command (" + why + ").";
+  $("#cdFans").textContent = rejected
+    ? "refused by the printer - " + why
+    : (pf.sent
+      ? "running - auxiliary " + pf.aux + " %, chamber " + pf.chamber + " %"
+      : (S.cfg && S.cfg.cooldown && S.cfg.cooldown.usePrinterFans
+        ? (active ? "not sent yet" : "allowed, but no session is running")
+        : "not used"));
+  $("#cdReject").hidden = !rejected;
+  $("#cdDashReject").hidden = !rejected;
+  if (rejected) {
+    $("#cdRejectHead").textContent = head;
+    $("#cdDashRejectHead").textContent = head;
+  }
   $("#cdReason").textContent = cd.reason ? (CD_REASONS[cd.reason] || cd.reason) : "-";
   $("#cdStart").disabled = active || !!p.printing;
   $("#cdStop").disabled = !active;
@@ -1347,7 +1384,8 @@ function renderCooldown(st) {
     $("#cdDashText").textContent = "Cooling " +
       (from != null ? t1(from) + " \u2192 " : "") + to + " \u00b0C" +
       (cha != null ? " (now " + t1(cha) + ")" : "") +
-      ", " + mins(cd.elapsedSec / 60) + ", printer fans " + (pf.sent ? "on" : "off");
+      ", " + mins(cd.elapsedSec / 60) + ", printer fans " +
+      (rejected ? "refused" : pf.sent ? "on" : "off");
     $("#cdDashText").setAttribute("data-tip",
       "This device's fan is following " + own + ". " +
       (pf.sent ? "The printer's auxiliary fan is at " + pf.aux + " % and its chamber fan at " +

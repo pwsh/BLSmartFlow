@@ -1,0 +1,10 @@
+{
+ "print": {
+  "command": "gcode_line",
+  "err_code": 84033543,
+  "param": "M106 P3 S255\n",
+  "reason": "mqtt message verify failed",
+  "result": "failed",
+  "sequence_id": "5002"
+ }
+}

@@ -12,20 +12,28 @@ printer. It takes five minutes and saves an hour.
 | A **USB data cable** | Many cheap USB cables are charge-only. A charge-only cable will not show the board to your computer at all — no port appears, nothing to select. |
 | A **2.4 GHz WiFi network** | The ESP32 has no 5 GHz radio. A 5 GHz-only network cannot be used and will not even appear in the device's scan list. |
 
-<div class="grid" markdown>
-![Render of the SmartFlow fan module housing](../img/smartflow_shell.png)
-![Render of the SmartFlow fan blades](../img/smartflow_blades.png)
-</div>
+![Illustration of the SmartFlow fan module](../img/smartflow-module.png){ width="220" align=right }
 
-## On the printer: LAN Only Mode
+*The SmartFlow module: the printed housing and the fan it drives.*
+
+## On the printer: LAN Only Mode and Developer Mode
 
 BLSmartFlow talks to the printer over the printer's **own local MQTT broker**. Nothing goes through
 Bambu's cloud, and the printer will not accept the connection unless local access is enabled.
 
-On the printer's screen, open **Settings → Network** and switch on:
+On the printer's screen, open **Settings → Network** and switch on **LAN Only Mode** *and*
+**Developer Mode**. They are not the same switch and they do different jobs:
 
-- **LAN Only Mode**, and
-- **Developer Mode**, which recent Bambu firmware additionally requires for local MQTT.
+| Switch | What it buys you | Needed for |
+|---|---|---|
+| **LAN Only Mode** | The printer serves its own MQTT broker on your network and hands out the 8-character access code. | **Everything BLSmartFlow reads**: temperatures, fan speeds, the print job, the door, the loaded filament. Without it there is no link at all. |
+| **Developer Mode** | The printer accepts *commands* over that link instead of signature-checking them away. | **One feature only**: [*Use the printer's fans*](../using/post-print-cooldown.md#using-the-printers-fans) in the post-print cool-down, which sends `M106`. |
+
+!!! tip "If you only ever want to read the printer, LAN Only Mode is enough"
+    A printer with Developer Mode off reports perfectly normally — so the symptom is not "no data",
+    it is a cool-down that says *the printer rejected the fan command* with the reason
+    `mqtt message verify failed`. See
+    [Troubleshooting: the printer link](../troubleshooting/printer-link.md#the-cool-down-says-the-printer-rejected-the-fan-command).
 
 !!! warning "The access code changes"
     Every time LAN Only Mode is switched off and on again, the printer generates a **new** access

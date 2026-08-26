@@ -72,7 +72,7 @@ print.{ command, nozzle_temper, nozzle_target_temper, bed_temper, bed_target_tem
         chamber_temper, cooling_fan_speed, big_fan1_speed, big_fan2_speed,
         heatbreak_fan_speed, fan_gear, gcode_state, mc_percent, mc_remaining_time,
         layer_num, total_layer_num, subtask_name, stg_cur, print_error, wifi_signal,
-        home_flag, lights_report, info.temp }
+        home_flag, lights_report, info.temp, sequence_id, result, reason, err_code }
 print.device.{ extruder, bed, ctc, airduct }
 print.ams.{ tray_now, ams[*].{ id, tray[*].{ id, tray_type, tray_sub_brands,
                                              tray_info_idx, tray_color } } }
@@ -82,6 +82,11 @@ print.vt_tray.{ … }
 Messages whose `print.command` is one of `gcode_line`, `project_prepare`, `project_file`,
 `clean_print_error`, `resume`, `get_accessories`, `prepare` or `extrusion_cali_get` are **ignored**
 outright — parsing them would blank out good data with the sparse fields of an acknowledgement.
+
+The one exception is the *result* of a `gcode_line`, which is read before the message is dropped —
+see [Command acknowledgements](#command-acknowledgements) below. The four extra keys in the filter
+(`sequence_id`, `result`, `reason`, `err_code`) exist for that; none of them appears in a
+`push_status` report, so no state parsing is affected.
 
 A message that survives filtering updates `lastUpdateMs`, which is what
 [staleness](control-loop.md#effective-modes) is measured against.
@@ -125,6 +130,32 @@ The [post-print cool-down](post-print-cooldown.md) feature is the one thing that
 rather than only listening. It uses a small spinlock-guarded queue,
 `printerLinkSendGcode(const char*)`, drained by the printer task — so no other task ever touches the
 MQTT client. Publish failures are logged and retried on the next tick.
+
+## Command acknowledgements
+
+Every `gcode_line` request is acknowledged on `device/<serial>/report`. On a healthy printer:
+
+```json
+{"print":{"command":"gcode_line","result":"SUCCESS","reason":"SUCCESS",
+          "err_code":0,"sequence_id":"5001"}}
+```
+
+With **Developer Mode off**, the printer signature-checks writes and answers instead:
+
+```json
+{"print":{"command":"gcode_line","result":"failed","reason":"mqtt message verify failed",
+          "err_code":84033543,"param":"M106 P3 S255\n","sequence_id":"5002"}}
+```
+
+Reports keep arriving either way — only commands are checked — so this ack is the *only* evidence
+that a command was refused.
+
+Bambu Studio acknowledges its own `gcode_line` requests on the same topic, so an ack only counts as
+ours when its `sequence_id` matches one we published. Our ids start at **5000** and increment, and
+the link keeps a ring of the **last four** it sent. A matching ack is recorded in the printer
+snapshot as `lastGcodeResult` / `lastGcodeReason` / `lastGcodeErr` / `lastGcodeMs`, surfaced as
+`printer.lastCommandError`, and cleared by the next accepted command. Everything else is dropped as
+before.
 
 ## Debugging
 

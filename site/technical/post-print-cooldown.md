@@ -30,6 +30,14 @@ The command path is a small **spinlock-guarded queue**, `printerLinkSendGcode(co
 by the [printer task](printer-link.md) — no other task ever touches the MQTT client. Publish failures
 are logged and retried on the next tick.
 
+!!! note "The printer can refuse the command"
+    With **Developer Mode** off, the printer answers with `result: "failed"` /
+    `reason: "mqtt message verify failed"` while continuing to report normally. The link matches that
+    acknowledgement to the `sequence_id` it sent (see
+    [Command acknowledgements](printer-link.md#command-acknowledgements)); the session then reports
+    `printerFans.error` and `printerFans.sent: false`, logs the refusal once, and drops the re-assert
+    cadence to `COOLDOWN_REJECT_RETRY_MS` (**5 minutes**) so a mid-session fix is still picked up.
+
 ## Configuration
 
 ```jsonc
@@ -64,7 +72,8 @@ It records `startedMs`, `startChamber`, the effective target and the material.
 ### Run — every 5 s
 
 - If `usePrinterFans` **and** `gcode_state ∈ {FINISH, IDLE}` **and** the gentle rule allows,
-  send or re-assert `M106 P2/P3`. **Re-asserted every 30 s**, because the printer may reset its fans
+  send or re-assert `M106 P2/P3`. **Re-asserted every 30 s** (5 minutes while the printer is refusing
+  the command, via `CooldownInputs.commandRejected`), because the printer may reset its fans
   on its own; also sent immediately whenever the requested value changes.
 - The device's own fan follows `ownFan`:
 
@@ -108,7 +117,7 @@ Blasting cold air at a hot ABS part is how it splits.
 ```json
 "cooldown": { "active": true, "reason": null, "target": 35, "chamber": 41.2,
               "startChamber": 52, "elapsedSec": 120, "maxSec": 1800,
-              "printerFans": { "aux": 100, "chamber": 100, "sent": true },
+              "printerFans": { "aux": 100, "chamber": 100, "sent": true, "error": null },
               "ownFan": "thermostat", "material": "abs" }
 ```
 
@@ -117,14 +126,20 @@ Blasting cold air at a hot ABS part is how it splits.
 | `POST /api/cooldown` | `{"start":true｜false}` → `{"ok":true,"cooldown":{…}}`; `400 {"error":"printer is busy"}` while a print runs |
 | `<base>/cooldown/set` | `ON` / `OFF` |
 
+`printerFans.error` is `"rejected: <reason>"` while the printer is refusing the command and `null`
+otherwise; `printerFans.sent` is forced to `false` for as long as it is set.
+
 Home Assistant gets `switch.cooldown` (state from `cooldown.active`) plus
-`sensor.cooldown_remaining` (minutes) and `sensor.cooldown_reason`.
+`sensor.cooldown_remaining` (minutes) and `sensor.cooldown_reason` — the latter carrying `error` and
+`printerFansSent` as attributes.
 
 ## Testing
 
 The decision logic lives in a pure `cooldown_logic.h` with its own native suite: start and stop
-conditions, gentle gating, re-assert timing and every reason code. The mock server runs sessions
-against its chamber model and logs the `M106` commands it would have sent.
+conditions, gentle gating, re-assert timing, the five-minute hold after a refusal, and every reason
+code. The mock server runs sessions against its chamber model and logs the `M106` commands it would
+have sent; `tools/mock_server.py --reject-gcode` makes it refuse them the way a printer with
+Developer Mode off does, so the UI path can be exercised without the hardware.
 
 ---
 

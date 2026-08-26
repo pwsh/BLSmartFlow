@@ -196,6 +196,54 @@ static void test_a_changed_speed_is_sent_at_once(void)
     TEST_ASSERT_EQUAL_UINT8(100, a.chamberPct);
 }
 
+// --- the printer refuses the command (Developer Mode off, 2.0.4) ------------
+// The X1C answers `gcode_line` with result "failed" / reason "mqtt message
+// verify failed" when Developer Mode is off. Re-asserting into that every 30 s
+// for a whole session would fill the log with refusals and achieve nothing.
+
+static void test_a_rejection_suppresses_the_reassert_for_five_minutes(void)
+{
+    Sim s;
+    s.seed();
+    TEST_ASSERT_TRUE(s.step(idleAt(48.0f)).sendFans);     // t = 0: our M106 goes out
+
+    CooldownInputs in = idleAt(47.0f);
+    in.commandRejected = true;                            // ... and comes back refused
+    // 5 s .. 295 s. An accepted command would have been re-asserted at 30, 60,
+    // 90 ... - here nothing is sent at all.
+    for (int t = 5; t < 300; t += 5) {
+        TEST_ASSERT_FALSE_MESSAGE(s.step(in).sendFans, "retried inside the five-minute hold");
+    }
+    // 300 s: one hopeful retry, because Developer Mode may have been switched on
+    // while the session was running.
+    TEST_ASSERT_TRUE(s.step(in).sendFans);
+}
+
+static void test_a_rejection_also_holds_back_a_changed_speed(void)
+{
+    Sim s;
+    s.seed();
+    TEST_ASSERT_TRUE(s.step(idleAt(48.0f)).sendFans);
+    s.cfg.auxSpeed = 60;                                  // normally sent at once
+    CooldownInputs in = idleAt(47.0f);
+    in.commandRejected = true;
+    TEST_ASSERT_FALSE(s.step(in).sendFans);
+    TEST_ASSERT_FALSE(s.step(in).sendFans);
+}
+
+static void test_the_normal_cadence_returns_once_a_command_is_accepted(void)
+{
+    Sim s;
+    s.seed();
+    TEST_ASSERT_TRUE(s.step(idleAt(48.0f)).sendFans);
+    CooldownInputs bad = idleAt(47.0f);
+    bad.commandRejected = true;
+    for (int i = 0; i < 5; i++) TEST_ASSERT_FALSE(s.step(bad).sendFans);   // to t = 25 s
+    // Developer Mode is switched on: the very next 30 s tick re-asserts again.
+    CooldownInputs ok = idleAt(46.0f);
+    TEST_ASSERT_TRUE(s.step(ok).sendFans);                                 // t = 30 s
+}
+
 // --- the safety gate --------------------------------------------------------
 
 static void test_no_gcode_unless_finish_or_idle(void)
@@ -492,6 +540,9 @@ int main(int, char**)
     RUN_TEST(test_printer_fans_off_means_nothing_is_ever_sent);
     RUN_TEST(test_reassert_only_every_thirty_seconds);
     RUN_TEST(test_a_changed_speed_is_sent_at_once);
+    RUN_TEST(test_a_rejection_suppresses_the_reassert_for_five_minutes);
+    RUN_TEST(test_a_rejection_also_holds_back_a_changed_speed);
+    RUN_TEST(test_the_normal_cadence_returns_once_a_command_is_accepted);
     RUN_TEST(test_no_gcode_unless_finish_or_idle);
     RUN_TEST(test_idle_state_is_a_valid_place_to_send);
     RUN_TEST(test_gentle_holds_the_fans_until_ten_below_the_chamber_target);

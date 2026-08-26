@@ -105,6 +105,12 @@ struct CooldownInputs {
     uint8_t     target;          // effective cool-down target for a session starting now
     const char* materialId;      // guide id, "" when unknown
     CooldownCommand command;     // a start/stop request latched since the last step
+    // The printer answered our last `gcode_line` with result "failed" - almost
+    // always "mqtt message verify failed", i.e. Developer Mode is switched off
+    // and the printer signature-checks write commands. Re-asserting every 30 s
+    // into that would fill the log with refusals for the whole session, so the
+    // cadence drops to COOLDOWN_REJECT_RETRY_MS until a command is accepted.
+    bool commandRejected;
 };
 
 struct CooldownState {
@@ -141,6 +147,10 @@ struct CooldownActions {
 // Re-assert cadence: the printer resets its fans on its own schedule, so a
 // command that is never repeated quietly stops being true.
 static const uint32_t COOLDOWN_REASSERT_MS = 30000;
+// ... unless the printer is refusing the command outright, in which case one
+// hopeful retry every five minutes is the most that is worth sending. It is not
+// zero: Developer Mode can be switched on while the session is running.
+static const uint32_t COOLDOWN_REJECT_RETRY_MS = 300000;
 // How long the printer may be silent before a running session gives up. Shorter
 // than fan.staleSec on purpose: this session is *commanding* the printer, and
 // commands sent into a dead link are worse than no session at all.
@@ -348,7 +358,12 @@ inline CooldownActions cooldownStep(CooldownState& st, const CooldownInputs& in,
         const uint8_t cha = gentle ? cddetail::half(cfg.chamberFanSpeed) : cfg.chamberFanSpeed;
         const bool changed = !st.sentOn || st.sentAux != aux || st.sentChamber != cha;
         const bool due = st.sentOn && (uint32_t)(nowMs - st.lastSendMs) >= COOLDOWN_REASSERT_MS;
-        if (changed || due) {
+        // A refused command holds *everything* back, not just the re-assert: a
+        // speed change the printer would refuse just as flatly is no reason to
+        // ask again a minute early.
+        const bool muted = in.commandRejected && st.everSent &&
+                           (uint32_t)(nowMs - st.lastSendMs) < COOLDOWN_REJECT_RETRY_MS;
+        if (!muted && (changed || due)) {
             a.sendFans = true;
             a.auxPct = aux;
             a.chamberPct = cha;

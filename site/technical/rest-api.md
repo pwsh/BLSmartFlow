@@ -325,7 +325,7 @@ retained to `<base>/state`.
                "remainingMin":87, "layer":12, "totalLayers":210,
                "task":"Bracket_v3.3mf", "phase":"printing",
                "doorOpen":false, "doorKnown":true, "doorEdgeCount":2,
-               "printError":0, "wifiSignal":"-45dBm",
+               "printError":0, "wifiSignal":"-45dBm", "lastCommandError":null,
                "temps": { "nozzle":220.4, "nozzleTarget":220, "bed":60.1, "bedTarget":60,
                           "chamber":38.0, "chamberTarget":45.0 },
                "fans":  { "part":100, "aux":0, "chamber":40, "heatbreak":100 } },
@@ -350,7 +350,7 @@ retained to `<base>/state`.
                "kOpen":[null,null,null,null,null], "samples":7 },
   "cooldown":{ "active":false, "reason":"target", "target":35, "chamber":41.2,
                "startChamber":52, "elapsedSec":0, "maxSec":1800,
-               "printerFans": { "aux":0, "chamber":0, "sent":false },
+               "printerFans": { "aux":0, "chamber":0, "sent":false, "error":null },
                "ownFan":"thermostat", "material":"abs" },
   "mqttExt": { "enabled":true, "connected":true }
 }
@@ -374,6 +374,8 @@ retained to `<base>/state`.
 | `printer.doorOpen` | Front-door switch — `true`/`false`, or **`null`** while `doorKnown` is false. The top lid has no sensor |
 | `printer.doorKnown` | An open/close edge has been observed, so the bit can be trusted. Everything door-driven is inert until then |
 | `printer.doorEdgeCount` | Transitions seen since boot; the first report is state, not an edge |
+| `printer.lastCommandError` | Why the printer refused the last command **we** sent, or `null`. `"mqtt message verify failed"` means Developer Mode is off on the printer. Cleared by the next accepted command |
+| `cooldown.printerFans.error` | `"rejected: <reason>"` while the printer is refusing the `M106`, else `null` |
 | `printer.temps.chamberTarget` | The printer's own chamber set point, `null` on machines without a chamber heater |
 | `fan.output` / `target` | Rounded percent actually driven / requested by the active mode |
 | `fan.effectiveMode` | `off｜manual｜stale｜door｜preheat｜idle｜cooldown｜chamber｜auto` |

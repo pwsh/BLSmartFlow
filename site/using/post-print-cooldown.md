@@ -45,13 +45,24 @@ The **Post-print cool-down** card sits on the *Fan curve* page.
 
     It is **off by default** and you have to turn it on deliberately.
 
+!!! warning "This needs Developer Mode on the printer"
+    On the printer's screen: **Settings → Network → Developer Mode**, with **LAN Only Mode** on as
+    well. The two are not the same thing — LAN Only Mode is what lets BLSmartFlow *read* the printer,
+    Developer Mode is what lets it *send a command*.
+
+    A printer with Developer Mode off keeps reporting perfectly, so nothing else looks wrong; it just
+    refuses each `M106` with `mqtt message verify failed`. When that happens the **Printer fans** row
+    reads *refused by the printer* and a red banner appears on both the cool-down card and the
+    dashboard. The session stops re-sending every 30 seconds and retries once every five minutes
+    instead, so switching Developer Mode on mid-session is picked up on its own.
+
 The safeguards, so you know what it will and will not do:
 
 - Commands are only ever sent while the printer reports **FINISH** or **IDLE**. If it reports
   RUNNING, PAUSE or PREPARE at the moment of sending, the session ends immediately without sending
   anything — **the print owns the fans**.
 - The requested speeds are **re-asserted every 30 seconds**, because the printer may reset its fans
-  on its own.
+  on its own — dropping to once every **five minutes** while the printer is refusing the command.
 - When the session stops, the fans are explicitly turned **back off** — but only if the device ever
   turned them on in the first place.
 
@@ -71,7 +82,8 @@ The card and the API report a reason:
 ## From Home Assistant
 
 Cool-down appears as a **switch** (`switch.cooldown`) plus two sensors: minutes remaining and the
-reason the last session ended. Turning the switch on starts a session, provided the printer is not
+reason the last session ended. The *Cool-down result* sensor also carries an **`error`** attribute —
+the printer's refusal text, or `none` — so an automation can notice a rejected fan command. Turning the switch on starts a session, provided the printer is not
 printing.
 → [Home Assistant](home-assistant.md)
 

@@ -43,16 +43,23 @@ This guide assumes you have never flashed an ESP32 before. Follow it top to bott
 * A 2.4 GHz WiFi network. The ESP32 has no 5 GHz radio, so a 5 GHz-only network cannot be used and
   will not even show up in the scan list.
 
-<p align="center">
-  <img src="img/smartflow_shell.png" alt="Render of the SmartFlow fan module housing" width="45%">
-  <img src="img/smartflow_blades.png" alt="Render of the SmartFlow fan blades" width="45%">
-</p>
+<img src="img/smartflow-module.png" alt="Illustration of the SmartFlow fan module" width="220">
 
 **On the printer**
 
 The printer must allow local MQTT access: enable **LAN Only Mode** on the printer's screen under
-*Settings → Network* (recent Bambu firmware additionally requires **Developer Mode** to be switched
-on there). Without it the printer refuses the connection. You then need three
+*Settings → Network*. Without it the printer refuses the connection.
+
+Switch on **Developer Mode** in the same place as well. The two do different jobs:
+
+* **LAN Only Mode** is what lets the device *connect and read*. Everything BLSmartFlow shows you —
+  temperatures, fan speeds, the print job, the door, the loaded filament — needs only this.
+* **Developer Mode** is what lets the device *send a command*. A printer with it switched off keeps
+  reporting perfectly but signature-checks every write and answers with
+  `mqtt message verify failed`. Only one feature is affected: *Use the printer's own fans* in the
+  post-print cool-down ([Section 9](#9-cooling-the-chamber-after-a-print)).
+
+You then need three
 values:
 
 | Value | Where to find it | Notes |
@@ -614,6 +621,13 @@ reads. Switching it on makes the device publish `M106` G-code over the printer's
 `M106 P2` for the auxiliary fan and `M106 P3` for the chamber fan, at the percentages you set, and
 `M106 P2 S0 / P3 S0` when the session ends.
 
+> **Callout — this needs Developer Mode on the printer.** On the printer's screen, *Settings →
+> Network → Developer Mode*, with LAN Only Mode on as well. Without it the printer refuses every
+> command with `mqtt message verify failed` while continuing to report normally, so nothing else in
+> BLSmartFlow looks wrong. When that happens the *Printer fans* row reads *refused by the printer*,
+> and both the card and the dashboard show a red banner saying what to switch on. The session stops
+> hammering the printer and retries once every five minutes, in case you enable it mid-session.
+
 It is off by default, and the safety rules around it are strict:
 
 * Commands are **only** ever sent while the printer reports `FINISH` or `IDLE`. If the printer is
@@ -723,7 +737,7 @@ What you get:
 | Printer WiFi, Device RSSI, Uptime | `sensor` | Diagnostics. |
 | Printer online, Door, Printing | `binary_sensor` | Connectivity, front door open, print running. *Door* shows **Unknown** on printers that never report a door change. |
 | Cool-down | `switch` | Starts and stops a post-print cool-down session (see [Section 9](#9-cooling-the-chamber-after-a-print)). It is the *session*, not the setting: switching it off does not disable the feature. |
-| Cool-down remaining, Cool-down result | `sensor` | Minutes left before the session gives up, and why the last one ended (`target`, `timeout`, `newJob`, `stopped`, `linkLost`, `disabled`). |
+| Cool-down remaining, Cool-down result | `sensor` | Minutes left before the session gives up, and why the last one ended (`target`, `timeout`, `newJob`, `stopped`, `linkLost`, `disabled`). *Cool-down result* also carries an `error` attribute holding the printer's refusal, if any, and `printerFansSent`. |
 | Restart | `button` | Reboots the device. |
 
 > **Details.** Turning discovery off again publishes empty discovery messages, which removes the
@@ -825,6 +839,7 @@ printer link beats stale data.
 | The fan never starts | Minimum speed is above what the curve asks for, or kick-start is off and the fan cannot break away | Lower **Minimum speed**, turn **Kick-start** on, or raise the curve |
 | The fan whines, buzzes or ticks | PWM carrier frequency does not suit the fan or the driver board | Keep **PWM frequency** at 25000 Hz for good 4-pin and 2-pin fans; some cheap fans and MOSFET boards prefer 1000–8000 Hz |
 | The fan runs full speed when the UI says 0 % | The driver board is active-low | Turn **Invert PWM** on |
+| The cool-down says **the printer rejected the fan command** | *Developer Mode* is off on the printer, so it signature-checks write commands and refuses the `M106` with `mqtt message verify failed`. Reports are unaffected, which is why nothing else looks broken | Printer screen → *Settings → Network → Developer Mode*, with LAN Only Mode on. The banner clears by itself on the next accepted command |
 | The printer's fans do nothing during a cool-down | *Use the printer's own fans* is off (it is by default), or the material's gentle rule is still holding them back, or the printer is not reporting `FINISH`/`IDLE` | Check the **Printer fans** row in the Post-print cool-down card — it says which of the three it is. Nothing is ever sent unless the printer reports `FINISH` or `IDLE` |
 | The cool-down ends immediately with *the printer started another job* | The printer went back to `RUNNING`, `PREPARE`, `PAUSE` or `SLICING` | Nothing to fix — this is the safety rule. A running print owns its own fans and the session gets out of the way without sending anything |
 | The cool-down never finishes | The target is below what the room can reach, so only the time limit can end it | Raise **Cool down to**, or lower **Give up after**. *Room temperature* on the Chamber thermostat card is a good sanity check |

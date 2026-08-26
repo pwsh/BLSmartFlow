@@ -311,8 +311,13 @@ void publishDiscoveryAll(bool remove)
                    "min", "duration", nullptr, "mdi:timer-sand", remove);
     static const char kCooldownReason[] =
         "{% set v = value_json.cooldown.reason %}{{ 'none' if v is none else v }}";
-    discoverSensor("cooldown_reason", "Cool-down result", kCooldownReason,
-                   nullptr, nullptr, nullptr, "mdi:information-outline", remove);
+    // The state is unchanged; the attribute carries the printer's refusal, so an
+    // automation can say "the fan command was rejected" without a second sensor.
+    static const char kCooldownReasonAttrs[] =
+        "{{ {'error': value_json.cooldown.printerFans.error,"
+        " 'printerFansSent': value_json.cooldown.printerFans.sent} | tojson }}";
+    discoverSensorWithAttrs("cooldown_reason", "Cool-down result", kCooldownReason,
+                            kCooldownReasonAttrs, "mdi:information-outline", remove);
 
     discoverBinary("printer_online", "Printer online", "{{ 'ON' if value_json.printer.online else 'OFF' }}", "connectivity", remove);
     // doorOpen is null until the printer has proved its door switch reports.

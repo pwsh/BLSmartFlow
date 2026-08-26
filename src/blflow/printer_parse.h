@@ -109,6 +109,26 @@ struct PrinterReport {
     int16_t    trayNow;                    // ams.tray_now, -1 = not reported
     int16_t    extruderState;              // H2D device.extruder.state, -1 = none
     uint16_t   extruderSnow[REPORT_MAX_EXTRUDERS];   // (ams << 8) | slot
+
+    // --- last acknowledgement of a command *we* sent (2.0.4) ----------------
+    // A Bambu printer with Developer Mode switched off still publishes its
+    // reports, but signature-checks every write command and answers a
+    // `gcode_line` request with result "failed" / reason "mqtt message verify
+    // failed". Nothing else in the firmware would ever notice, so the ack is
+    // recorded here and surfaced as printer.lastCommandError.
+    // lastGcodeMs is 0 until an ack for one of our own sequence ids arrives.
+    bool     lastGcodeResult;         // true = accepted
+    uint32_t lastGcodeErr;            // err_code, 0 when the printer sent none
+    uint32_t lastGcodeMs;             // nowMs of the ack, 0 = never
+    char     lastGcodeReason[48];
+};
+
+// A `gcode_line` acknowledgement, before it is matched against the ids we sent.
+struct GcodeAck {
+    uint32_t sequenceId;
+    bool     ok;
+    uint32_t errCode;
+    char     reason[48];
 };
 
 // Print phase, derived from gcode_state + stg_cur + the temperature targets
@@ -138,6 +158,20 @@ inline void copyStr(char* dst, size_t dstSize, const char* src)
     dst[i] = '\0';
 }
 
+// strcasecmp lives in <strings.h> on POSIX and in <string.h> on the ESP32
+// toolchain; rather than guess, compare ASCII case-insensitively by hand.
+inline bool equalsIgnoreCase(const char* a, const char* b)
+{
+    if (!a || !b) return false;
+    for (; *a && *b; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+        if (ca != cb) return false;
+    }
+    return *a == *b;
+}
+
 }  // namespace detail
 
 inline float packedCurrent(uint32_t packed) { return (float)(packed & 0xFFFFu); }
@@ -158,6 +192,13 @@ inline void printerReportInit(PrinterReport& r)
     r.trayNow = -1;
     r.extruderState = -1;
     for (uint8_t i = 0; i < REPORT_MAX_EXTRUDERS; i++) r.extruderSnow[i] = REPORT_SNOW_UNKNOWN;
+    r.lastGcodeResult = true;      // nothing has failed yet
+}
+
+// True when the newest ack we matched to one of our own commands was a refusal.
+inline bool reportCommandFailed(const PrinterReport& r)
+{
+    return r.lastGcodeMs != 0 && !r.lastGcodeResult;
 }
 
 // ha-bambulab CURRENT_STAGE_IDS, in the snake_case spelling the 2.0 API already
@@ -291,6 +332,51 @@ inline bool isIgnoredCommand(const char* cmd)
     return false;
 }
 
+// Reads a `gcode_line` acknowledgement out of a (filtered) report document.
+// Returns false for anything that is not one, or for the bare acks that carry
+// no `result` at all - the caller then treats the message exactly as before.
+//
+// The ack is *not* applied here: only printer_link.cpp knows which sequence ids
+// we actually sent, and Bambu Studio's acks travel over the same topic. See
+// applyGcodeAck().
+inline bool parseGcodeAck(JsonVariantConst root, GcodeAck& out)
+{
+    JsonVariantConst print = root["print"];
+    if (!print.is<JsonObjectConst>()) return false;
+    JsonObjectConst p = print.as<JsonObjectConst>();
+    const char* cmd = p["command"] | (const char*)nullptr;
+    if (!cmd || strcmp(cmd, "gcode_line") != 0) return false;
+    const char* result = p["result"] | (const char*)nullptr;
+    if (!result || !*result) return false;
+
+    memset(&out, 0, sizeof(out));
+    // The id is a decimal *string* in every firmware seen so far, but a couple
+    // of P1 builds send it as a number, so both are accepted.
+    JsonVariantConst seq = p["sequence_id"];
+    if (seq.is<const char*>()) out.sequenceId = (uint32_t)strtoul(seq.as<const char*>(), nullptr, 10);
+    else if (seq.is<unsigned long>() || seq.is<int>()) out.sequenceId = (uint32_t)seq.as<unsigned long>();
+
+    // "SUCCESS" on an X1C, "success" on some P-series builds; "failed" is the
+    // refusal we care about.
+    out.ok = detail::equalsIgnoreCase(result, "success");
+    out.errCode = (uint32_t)(p["err_code"] | 0UL);
+    detail::copyStr(out.reason, sizeof(out.reason), p["reason"] | "");
+    return true;
+}
+
+// Records an ack the caller has confirmed is a reply to one of our own commands.
+// `nowMs` is millis(); it is coerced away from 0 so lastGcodeMs stays a reliable
+// "an ack has arrived" flag.
+inline void applyGcodeAck(PrinterReport& r, const GcodeAck& ack, uint32_t nowMs)
+{
+    r.lastGcodeResult = ack.ok;
+    r.lastGcodeErr = ack.ok ? 0 : ack.errCode;
+    r.lastGcodeMs = nowMs ? nowMs : 1;
+    // A success clears the message: the status document shows lastCommandError
+    // as null again the moment the printer accepts something.
+    detail::copyStr(r.lastGcodeReason, sizeof(r.lastGcodeReason), ack.ok ? "" : ack.reason);
+}
+
 // Builds the deserialisation filter. The full report has around 90 top-level
 // keys including large `ams`, `ipcam`, `xcam`, `net` and `upload` blocks; keeping
 // the filter tight is what makes a 16 KB message cheap to parse.
@@ -298,6 +384,12 @@ inline void buildPrinterFilter(JsonDocument& filter)
 {
     JsonObject p = filter["print"].to<JsonObject>();
     p["command"] = true;
+    // Kept for the `gcode_line` acknowledgement path (parseGcodeAck): a printer
+    // with Developer Mode off refuses our M106 lines and says so right here.
+    p["sequence_id"] = true;
+    p["result"] = true;
+    p["reason"] = true;
+    p["err_code"] = true;
     p["nozzle_temper"] = true;
     p["nozzle_target_temper"] = true;
     p["bed_temper"] = true;

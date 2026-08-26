@@ -68,7 +68,41 @@ GcodeSlot     g_gcodeQ[kGcodeSlots];
 uint8_t       g_gcodeHead = 0;      // next free slot
 uint8_t       g_gcodeTail = 0;      // oldest unpublished slot
 portMUX_TYPE  g_gcodeMux = portMUX_INITIALIZER_UNLOCKED;
-uint32_t      g_gcodeSeq = 1;
+
+// Sequence ids for our own requests. They start well clear of the small numbers
+// Bambu Studio and the printer's own housekeeping use, so an ack that carries
+// one of ours is unambiguous.
+const uint32_t kGcodeSeqBase = 5000;
+uint32_t      g_gcodeSeq = kGcodeSeqBase;
+
+// The last four ids we published. `gcode_line` acks from Bambu Studio arrive on
+// the same report topic and must not be mistaken for replies to us; four is one
+// per queue slot, which is as many commands as can be in flight.
+const uint8_t kSentIdSlots = 4;
+uint32_t      g_sentIds[kSentIdSlots] = {0};
+uint8_t       g_sentIdNext = 0;
+
+void rememberSentId(uint32_t id)
+{
+    portENTER_CRITICAL(&g_gcodeMux);
+    g_sentIds[g_sentIdNext] = id;
+    g_sentIdNext = (uint8_t)((g_sentIdNext + 1) % kSentIdSlots);
+    portEXIT_CRITICAL(&g_gcodeMux);
+}
+
+// True when `id` is one we published recently. Id 0 is never ours - it is the
+// empty ring slot, and also the id the printer's own pushall replies carry.
+bool isOurSequenceId(uint32_t id)
+{
+    if (id == 0) return false;
+    bool ours = false;
+    portENTER_CRITICAL(&g_gcodeMux);
+    for (uint8_t i = 0; i < kSentIdSlots; i++) {
+        if (g_sentIds[i] == id) { ours = true; break; }
+    }
+    portEXIT_CRITICAL(&g_gcodeMux);
+    return ours;
+}
 
 uint32_t g_backoffMs = kBackoffMinMs;
 uint32_t g_nextAttemptMs = 0;
@@ -97,6 +131,24 @@ void parseReport(const char* payload, size_t len, const LinkCfg& lc)
         deserializeJson(doc, payload, len, DeserializationOption::Filter(filter));
     if (err) {
         LOGW("printer report parse error: %s", err.c_str());
+        return;
+    }
+
+    // A `gcode_line` acknowledgement carries no state, so it never reaches the
+    // report parser - but the *result* is the only way to learn that a printer
+    // with Developer Mode off is silently refusing our M106 lines. Only acks for
+    // ids we published are ours; Bambu Studio's are ignored exactly as before.
+    GcodeAck ack;
+    if (parseGcodeAck(doc.as<JsonVariantConst>(), ack)) {
+        if (isOurSequenceId(ack.sequenceId)) {
+            PrinterState st = printerBegin();
+            applyGcodeAck(st, ack, millis());
+            printerCommit(st);
+            if (!ack.ok) {
+                LOGW("printer -> refused our command: %s (err %u)",
+                     ack.reason[0] ? ack.reason : "no reason given", (unsigned)ack.errCode);
+            }
+        }
         return;
     }
 
@@ -188,6 +240,7 @@ bool publishOneGcode()
     size_t end = strlen(disp);
     while (end > 0 && disp[end - 1] == ' ') disp[--end] = '\0';
     LOGI("printer <- %s", disp);
+    rememberSentId(g_gcodeSeq);
     g_gcodeSeq++;
 
     portENTER_CRITICAL(&g_gcodeMux);

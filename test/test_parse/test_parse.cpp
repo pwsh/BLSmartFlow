@@ -63,6 +63,7 @@ static void test_fixtures_present(void)
     TEST_ASSERT_TRUE_MESSAGE(loadFixture("x1c_push_status.json").size() > 100,
                              "test/fixtures/x1c_push_status.json not found");
     TEST_ASSERT_TRUE(loadFixture("x1c_gcode_line.json").size() > 10);
+    TEST_ASSERT_TRUE(loadFixture("x1c_gcode_line_rejected.json").size() > 10);
 }
 
 static void test_push_status_is_accepted(void)
@@ -504,6 +505,105 @@ static void test_filter_skips_bulky_blocks(void)
     TEST_ASSERT_FALSE(print["gcode_state"].isNull());
 }
 
+// --- gcode_line acknowledgements (2.0.4) ---------------------------------
+// A printer with Developer Mode off keeps reporting but refuses every write
+// command. The refusal is the only evidence, and it arrives on the same topic as
+// Bambu Studio's own acks - so the sequence id is what decides whether it is
+// ours.
+
+// Runs a fixture through the production filter and the ack reader.
+static bool ackFixture(const char* name, GcodeAck& ack)
+{
+    const std::string json = loadFixture(name);
+    JsonDocument filter;
+    buildPrinterFilter(filter);
+    JsonDocument doc;
+    DeserializationError err =
+        deserializeJson(doc, json.c_str(), json.size(), DeserializationOption::Filter(filter));
+    TEST_ASSERT_FALSE_MESSAGE(err, err.c_str());
+    return parseGcodeAck(doc.as<JsonVariantConst>(), ack);
+}
+
+static void test_rejected_ack_is_decoded(void)
+{
+    GcodeAck ack;
+    TEST_ASSERT_TRUE(ackFixture("x1c_gcode_line_rejected.json", ack));
+    TEST_ASSERT_EQUAL_UINT32(5002u, ack.sequenceId);
+    TEST_ASSERT_FALSE(ack.ok);
+    TEST_ASSERT_EQUAL_UINT32(84033543u, ack.errCode);
+    TEST_ASSERT_EQUAL_STRING("mqtt message verify failed", ack.reason);
+}
+
+static void test_successful_ack_is_decoded(void)
+{
+    GcodeAck ack;
+    TEST_ASSERT_TRUE(ackFixture("x1c_gcode_line.json", ack));
+    TEST_ASSERT_EQUAL_UINT32(2023u, ack.sequenceId);
+    TEST_ASSERT_TRUE(ack.ok);                 // "SUCCESS", any case
+    TEST_ASSERT_EQUAL_UINT32(0u, ack.errCode);
+}
+
+static void test_push_status_is_not_an_ack(void)
+{
+    GcodeAck ack;
+    TEST_ASSERT_FALSE(ackFixture("x1c_push_status.json", ack));
+}
+
+// The id filter is the caller's job (printer_link.cpp keeps the ring of ids it
+// published); this is the state change it drives on either side of that gate.
+static void test_ours_updates_state_and_not_ours_does_not(void)
+{
+    GcodeAck ack;
+    TEST_ASSERT_TRUE(ackFixture("x1c_gcode_line_rejected.json", ack));
+
+    PrinterReport ours;
+    printerReportInit(ours);
+    TEST_ASSERT_FALSE(reportCommandFailed(ours));
+    // sequence_id 5002 is in our range, so printer_link would apply it.
+    applyGcodeAck(ours, ack, 123456u);
+    TEST_ASSERT_TRUE(reportCommandFailed(ours));
+    TEST_ASSERT_EQUAL_STRING("mqtt message verify failed", ours.lastGcodeReason);
+    TEST_ASSERT_EQUAL_UINT32(84033543u, ours.lastGcodeErr);
+    TEST_ASSERT_EQUAL_UINT32(123456u, ours.lastGcodeMs);
+
+    // Bambu Studio's ack (a low id) is never applied, so the report is untouched.
+    PrinterReport theirs;
+    printerReportInit(theirs);
+    GcodeAck studio;
+    TEST_ASSERT_TRUE(ackFixture("x1c_gcode_line.json", studio));
+    TEST_ASSERT_TRUE(studio.sequenceId < 5000u);
+    TEST_ASSERT_FALSE(reportCommandFailed(theirs));
+    TEST_ASSERT_EQUAL_UINT32(0u, theirs.lastGcodeMs);
+}
+
+static void test_a_success_clears_a_previous_rejection(void)
+{
+    PrinterReport r;
+    printerReportInit(r);
+    GcodeAck bad;
+    TEST_ASSERT_TRUE(ackFixture("x1c_gcode_line_rejected.json", bad));
+    applyGcodeAck(r, bad, 1000u);
+    TEST_ASSERT_TRUE(reportCommandFailed(r));
+
+    GcodeAck good;
+    TEST_ASSERT_TRUE(ackFixture("x1c_gcode_line.json", good));
+    applyGcodeAck(r, good, 2000u);
+    TEST_ASSERT_FALSE(reportCommandFailed(r));
+    TEST_ASSERT_EQUAL_STRING("", r.lastGcodeReason);
+    TEST_ASSERT_EQUAL_UINT32(0u, r.lastGcodeErr);
+}
+
+// An ack still carries no printer state: the report parser must reject it, or a
+// refusal would blank out the temperatures.
+static void test_a_rejected_ack_is_still_not_a_report(void)
+{
+    PrinterReport r;
+    printerReportInit(r);
+    r.progress = 42;
+    TEST_ASSERT_FALSE(parseFixture(loadFixture("x1c_gcode_line_rejected.json"), r));
+    TEST_ASSERT_EQUAL_INT(42, r.progress);
+}
+
 int main(int, char**)
 {
     UNITY_BEGIN();
@@ -533,5 +633,11 @@ int main(int, char**)
     RUN_TEST(test_phase_names_round_trip);
     RUN_TEST(test_printing_matches_phase_definition);
     RUN_TEST(test_stage_names);
+    RUN_TEST(test_rejected_ack_is_decoded);
+    RUN_TEST(test_successful_ack_is_decoded);
+    RUN_TEST(test_push_status_is_not_an_ack);
+    RUN_TEST(test_ours_updates_state_and_not_ours_does_not);
+    RUN_TEST(test_a_success_clears_a_previous_rejection);
+    RUN_TEST(test_a_rejected_ack_is_still_not_a_report);
     return UNITY_END();
 }

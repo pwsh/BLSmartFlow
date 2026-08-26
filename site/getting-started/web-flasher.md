@@ -44,6 +44,14 @@ is published together with this site, so it always matches the documentation you
     this site is built by the repository's CI from the branch the site is generated from; the version is shown
     in the button dialog.
 
+## Alternative: a generic browser flasher
+
+Any browser-based esptool works too, for example [esptool.spacehuhn.com](https://esptool.spacehuhn.com/)
+(Chrome/Edge): download [`firmware/latest.bin`](https://pwsh.github.io/BLSmartFlow/firmware/latest.bin),
+connect the board, **erase** the flash, then add the file at offset **`0x0`** and program. Handy when this
+page's button cannot reach the serial port, or when you want to flash a specific version from the
+[release assets](https://github.com/pwsh/BLSmartFlow/releases).
+
 ## Manual download
 
 If you prefer a local tool: the current image is available at

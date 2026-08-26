@@ -5,6 +5,32 @@ banner, `/api/info`, the merged image name and `firmware/manifest.json`.
 
 ---
 
+## 2.0.4 — printer command rejection, narrow-screen header
+
+!!! info "In development"
+
+- **The printer can now say no, and you get told.** A Bambu printer with **Developer Mode** switched
+  off keeps reporting normally but signature-checks every write command, refusing the cool-down's
+  `M106` with `mqtt message verify failed`. That acknowledgement used to be dropped as noise. The
+  link now matches it to the `sequence_id` it sent (ours start at 5000; Bambu Studio's acks are still
+  ignored) and records it.
+- The cool-down reports `cooldown.printerFans.error` and forces `printerFans.sent` to `false`, logs
+  the refusal **once per session**, and retries once every **5 minutes** instead of every 30 seconds
+  — so switching Developer Mode on mid-session is still picked up.
+- New status field `printer.lastCommandError`, cleared by the next accepted command. The Home
+  Assistant *Cool-down result* sensor carries it as an `error` attribute.
+- The dashboard and the cool-down card show a banner explaining exactly which printer setting to
+  switch on.
+- **Fixed: the header forced a ~429 px minimum page width**, so cards were clipped on the right on a
+  390 px phone. The header now wraps — badges move under the brand below 430 px and a long SSID
+  truncates — and card headers wrap their badges instead of overflowing.
+- `tools/mock_server.py --reject-gcode` reproduces the refusal without the hardware.
+
+→ [Post-print cool-down](../using/post-print-cooldown.md) ·
+[Troubleshooting: the printer link](../troubleshooting/printer-link.md#the-cool-down-says-the-printer-rejected-the-fan-command)
+
+---
+
 ## 2.0.3 — post-print cool-down
 
 !!! info "In development"

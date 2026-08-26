@@ -567,6 +567,9 @@ K_PRINTER_FAN = 0.90
 CHAMBER_HEAT_C_PER_SEC = 0.20
 COOLDOWN_SAMPLE_SEC = 5.0
 COOLDOWN_REASSERT_SEC = 30.0
+# A printer that refuses the command (Developer Mode off) is retried this often
+# instead - see --reject-gcode.
+COOLDOWN_REJECT_RETRY_SEC = 300.0
 COOLDOWN_LINK_GRACE_SEC = 30.0
 
 
@@ -638,6 +641,12 @@ class Sim:
         self.cd_prev_phase = None
         self.cd_last_step = 0.0
         self.cd_command = None                 # "start" / "stop", latched by the API
+        # --reject-gcode: the printer answers every command with
+        # result "failed" / reason "mqtt message verify failed", exactly as an
+        # X1C does when Developer Mode is switched off.
+        self.cd_rejected = False
+        self.cd_reject_reason = None
+        self.cd_reject_logged = False
         # cooling-rate learning (spec 15.4)
         self.win = None                        # dict(start, t0, last, tlast, out, door)
         self.rate_c_per_min = None
@@ -1063,6 +1072,20 @@ class Sim:
         the firmware would publish as a `gcode_line` request."""
         BUS.log("I", "printer <- M106 P2 S%d M106 P3 S%d"
                 % (round(aux * 255 / 100.0), round(chamber * 255 / 100.0)))
+        if not self.args.reject_gcode:
+            self.cd_rejected = False
+            self.cd_reject_reason = None
+            return
+        # The refusal comes back on device/<serial>/report as a `gcode_line` ack
+        # whose sequence_id is one of ours, which is the only reason the firmware
+        # ever notices it.
+        self.cd_rejected = True
+        self.cd_reject_reason = "mqtt message verify failed"
+        BUS.log("W", "printer -> refused our command: mqtt message verify failed (err 84033543)")
+        if not self.cd_reject_logged:
+            self.cd_reject_logged = True
+            BUS.log("W", "cooldown: printer rejected M106 (mqtt message verify failed)"
+                         " - enable Developer Mode on the printer")
 
     def cd_stop(self, reason, send_stop):
         self.cd_active = False
@@ -1113,6 +1136,7 @@ class Sim:
             self.cd_at_target = 0
             self.cd_link_lost_at = None
             self.cd_material = self.filament()["id"] or None
+            self.cd_reject_logged = False       # one Developer Mode warning per session
             BUS.log("I", "cooldown: started, chamber %.1f -> %d C"
                     % (self.chamber, self.cd_target))
 
@@ -1151,7 +1175,10 @@ class Sim:
             changed = (not self.cd_sent_on or aux != self.cd_aux
                        or cha != self.cd_chamber_fan)
             due = self.cd_sent_on and now - self.cd_last_send >= COOLDOWN_REASSERT_SEC
-            if changed or due:
+            # A refused command holds everything back until the five-minute retry
+            muted = (self.cd_rejected and self.cd_ever_sent
+                     and now - self.cd_last_send < COOLDOWN_REJECT_RETRY_SEC)
+            if not muted and (changed or due):
                 self.cd_send_fans(aux, cha)
                 self.cd_sent_on = self.cd_ever_sent = True
                 self.cd_aux, self.cd_chamber_fan = aux, cha
@@ -1175,7 +1202,10 @@ class Sim:
             "elapsedSec": int(now - self.cd_started) if self.cd_active else 0,
             "maxSec": int(c["maxMinutes"]) * 60,
             "printerFans": {"aux": self.cd_aux, "chamber": self.cd_chamber_fan,
-                            "sent": self.cd_sent_on},
+                            # a refused command means the fans are not running
+                            "sent": self.cd_sent_on and not self.cd_rejected,
+                            "error": ("rejected: " + self.cd_reject_reason)
+                            if self.cd_rejected else None},
             "ownFan": c["ownFan"],
             "material": self.cd_material if self.cd_active else None,
         }
@@ -1230,6 +1260,8 @@ class Sim:
                     "doorKnown": self.door_known, "doorEdgeCount": self.door_edges,
                     "printError": 0,
                     "wifiSignal": "-45dBm" if self.printer_connected else "",
+                    # the printer's answer to the last command we sent
+                    "lastCommandError": self.cd_reject_reason if self.cd_rejected else None,
                     "temps": self.temps(),
                     "fans": {"part": out, "aux": 0, "chamber": 40, "heatbreak": 100}
                     if self.printer_connected else
@@ -1778,6 +1810,9 @@ def main():
                     help="start with the door reported open (POST /mock/door toggles it)")
     ap.add_argument("--filament", default="", metavar="TYPE",
                     help="override the loaded tray's material, e.g. --filament ABS")
+    ap.add_argument("--reject-gcode", action="store_true",
+                    help="the printer refuses every command with 'mqtt message verify "
+                         "failed', as it does when Developer Mode is off")
     ap.add_argument("--auth", default="", metavar="USER:PASS", help="require basic auth")
     args = ap.parse_args()
 
@@ -1794,6 +1829,7 @@ def main():
     threading.Thread(target=sim.run, daemon=True).start()
     modes = [m for m, on in (("AP", args.ap), ("offline-printer", args.offline),
                              ("door-open", args.door),
+                             ("reject-gcode", args.reject_gcode),
                              ("auth", bool(args.auth))) if on] or ["normal"]
     print("BLSmartFlow mock API on http://localhost:%d/  (%s)  serving %s  — Ctrl-C to stop"
           % (args.port, ", ".join(modes), os.path.relpath(INDEX, os.getcwd())), flush=True)

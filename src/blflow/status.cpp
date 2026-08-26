@@ -106,6 +106,11 @@ void buildStatus(JsonObject out)
     pr["doorEdgeCount"] = p.doorEdgeCount;
     pr["printError"] = p.printError;
     pr["wifiSignal"] = String(p.wifiSignal);
+    // The printer's answer to the last command *we* sent, and null again as soon
+    // as it accepts one. A printer with Developer Mode switched off keeps
+    // reporting normally but refuses every write, which is otherwise invisible.
+    if (reportCommandFailed(p)) pr["lastCommandError"] = String(p.lastGcodeReason);
+    else pr["lastCommandError"] = nullptr;
 
     JsonObject t = pr["temps"].to<JsonObject>();
     setTemp(t, "nozzle", p.nozzle);

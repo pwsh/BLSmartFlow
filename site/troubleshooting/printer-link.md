@@ -67,6 +67,22 @@ designed behaviour, not a fault.
     `chamber_temper` will show nothing.
     → [Field decoding](../technical/printer-link.md#field-decoding)
 
+## The cool-down says the printer rejected the fan command
+
+**Why.** **Developer Mode** is switched off on the printer. Bambu firmware signature-checks every
+*write* command, so the printer answers the `M106` the cool-down sends with
+`result: "failed"` / `reason: "mqtt message verify failed"`. Reports are not signature-checked, which
+is why everything else on the page keeps updating and nothing looks broken.
+
+**Fix.** On the printer's screen: **Settings → Network → Developer Mode**, with **LAN Only Mode** on
+as well. Only [*Use the printer's fans*](../using/post-print-cooldown.md#using-the-printers-fans) is
+affected; every other feature works without it.
+
+!!! note "It clears itself"
+    While the printer is refusing, the session retries once every five minutes instead of every 30
+    seconds, and the banner disappears as soon as one command is accepted. `printer.lastCommandError`
+    in [`/api/status`](../technical/rest-api.md) carries the same text.
+
 ## The link drops when I change a setting
 
 Only `ip`, `accessCode` and `serial` tear the session down. `staleSec` and the MQTT-dump switch are

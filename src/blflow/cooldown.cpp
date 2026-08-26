@@ -53,7 +53,20 @@ struct CooldownPublic {
     uint8_t  ownFan;
     bool     materialKnown;
     char     material[24];
+    char     error[64];      // "" when the printer has not refused anything
 };
+
+// --- printer refusals (Developer Mode off) ---------------------------------
+// A printer that signature-checks write commands answers our M106 with result
+// "failed" / reason "mqtt message verify failed". printer_link records that ack
+// in the printer snapshot (only for sequence ids we sent), and this is where the
+// session notices it: the fans are reported as not running, the error travels in
+// the status document, and the re-assert cadence drops to five minutes.
+uint32_t g_lastFanSendMs = 0;   // millis() of our last M106, 0 = nothing sent yet
+uint32_t g_ackSeenMs = 0;       // lastGcodeMs of the ack we have already handled
+bool     g_rejected = false;
+bool     g_rejectLogged = false;   // the warning is logged once per session
+char     g_rejectErr[64] = {0};
 
 CooldownPublic g_pub{};
 portMUX_TYPE   g_pubMux = portMUX_INITIALIZER_UNLOCKED;
@@ -81,6 +94,9 @@ void publish(const CooldownRules& cfg)
     p.ownFan = cfg.ownFan;
     p.materialKnown = g_st.active && g_st.material[0] != '\0';
     strlcpy(p.material, g_st.material, sizeof(p.material));
+    strlcpy(p.error, g_rejected ? g_rejectErr : "", sizeof(p.error));
+    // A refused command means the fans are not running, whatever we asked for.
+    if (g_rejected) p.sent = false;
     portENTER_CRITICAL(&g_pubMux);
     g_pub = p;
     portEXIT_CRITICAL(&g_pubMux);
@@ -108,6 +124,7 @@ void sendFans(uint8_t auxPct, uint8_t chamberPct)
              (unsigned)auxPct, (unsigned)chamberPct);
         return;
     }
+    g_lastFanSendMs = millis();
     LOGI("cooldown: printer fans aux %u%%, chamber %u%%", (unsigned)auxPct, (unsigned)chamberPct);
 }
 
@@ -117,6 +134,7 @@ void sendFansOff()
         LOGW("cooldown: could not queue the fan stop command");
         return;
     }
+    g_lastFanSendMs = millis();
     LOGI("cooldown: printer fans released");
 }
 
@@ -144,6 +162,27 @@ void step(CooldownCommand cmd)
     const PrinterState p = printerSnapshot();
     const FilamentStatus fil = filamentResolve(p, filcfg, fan);
 
+    // Has the printer answered one of our commands since the last sample? Only
+    // acks matched to our own sequence ids ever reach the snapshot, so a failure
+    // here is always a refusal of something this session sent.
+    if (p.lastGcodeMs != 0 && p.lastGcodeMs != g_ackSeenMs && g_lastFanSendMs != 0) {
+        g_ackSeenMs = p.lastGcodeMs;
+        if (!p.lastGcodeResult) {
+            g_rejected = true;
+            snprintf(g_rejectErr, sizeof(g_rejectErr), "rejected: %s",
+                     p.lastGcodeReason[0] ? p.lastGcodeReason : "printer refused the command");
+            if (!g_rejectLogged) {
+                g_rejectLogged = true;
+                LOGW("cooldown: printer rejected M106 (%s) - enable Developer Mode on the printer",
+                     p.lastGcodeReason[0] ? p.lastGcodeReason : "no reason given");
+            }
+        } else {
+            // Developer Mode was switched on, or the refusal was transient.
+            g_rejected = false;
+            g_rejectErr[0] = '\0';
+        }
+    }
+
     CooldownInputs in{};
     in.phase = printerPhase(p);
     in.gcodeState = p.gcodeState;
@@ -156,10 +195,12 @@ void step(CooldownCommand cmd)
     in.target = filcfg.autoDetect ? fil.eff.cooldownTarget : rules.target;
     in.materialId = fil.id;
     in.command = cmd;
+    in.commandRejected = g_rejected;
 
     const CooldownActions a = cooldownStep(g_st, in, rules, now);
 
     if (a.startedNow) {
+        g_rejectLogged = false;    // one Developer Mode warning per session
         LOGI("cooldown: started, chamber %.1f -> %u C%s", (double)in.chamber,
              (unsigned)g_st.target, rules.usePrinterFans ? ", printer fans allowed" : "");
     }
@@ -262,6 +303,10 @@ void cooldownToJson(JsonObject out)
     pf["aux"] = p.aux;
     pf["chamber"] = p.chamberFan;
     pf["sent"] = p.sent;
+    // Null unless the printer refused the command - the UI turns this into the
+    // "enable Developer Mode" banner.
+    if (p.error[0]) pf["error"] = String(p.error);
+    else pf["error"] = nullptr;
 
     out["ownFan"] = cooldownOwnFanName(p.ownFan);
     if (p.materialKnown) out["material"] = String(p.material);

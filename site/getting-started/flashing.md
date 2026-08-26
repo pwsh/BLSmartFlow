@@ -32,7 +32,7 @@ not boot; uploading the merged file to the OTA page is rejected or wastes the sl
 
 1. Use **Chrome or Edge on a desktop computer**. Firefox and Safari cannot talk to serial ports at
    all, so the *Connect* button will do nothing there.
-2. Open the **[Web flasher](web-flasher.md)** page of this documentation — it carries the firmware image that matches these docs. (The `esphome.html` file in the repository is the same button for local use; the DutchDevelop Universal-Flasher only lists the upstream 2025.x firmware.)
+2. Open the **[Web flasher](web-flasher.md)** page of this documentation — it carries the firmware image that matches these docs. Any generic browser flasher such as [esptool.spacehuhn.com](https://esptool.spacehuhn.com/) also works: download `latest.bin` from the same page, erase, and program it at offset `0x0`. (The `esphome.html` file in the repository is the same button for local use; the DutchDevelop Universal-Flasher only lists the upstream 2025.x firmware.)
 3. Plug the board in with the USB **data** cable.
 4. Click **Connect** and pick the serial port that appears. It is usually named something like
    `CP210x`, `CH340`, `USB Serial` or `wchusbserial`.
